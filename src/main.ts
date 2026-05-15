@@ -1298,6 +1298,7 @@ export default class ObsidianGit extends Plugin {
         };
         const tempRepo = new GitRepo(this, config);
         try {
+            await tempRepo.init();
             await tempRepo.gitManager.clone(
                 formatRemoteUrl(url),
                 dir || ".",
