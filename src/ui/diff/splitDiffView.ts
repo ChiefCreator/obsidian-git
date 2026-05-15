@@ -107,11 +107,12 @@ export default class SplitDiffView extends ItemView {
         this.fileSaveDebouncer = debounce(
             (data: string) => {
                 const file = this.state.bFile;
-                if (file) {
+                const repo = this.resolveRepo();
+                if (file && repo) {
                     this.ignoreNextModification = true;
                     this.plugin.app.vault.adapter
                         .write(
-                            this.plugin.gitManager.getRelativeVaultPath(file),
+                            repo.gitManager.getRelativeVaultPath(file),
                             data
                         )
                         .catch((e) => this.plugin.displayError(e));
@@ -120,6 +121,26 @@ export default class SplitDiffView extends ItemView {
             1000,
             false
         );
+    }
+
+    /** Resolve the GitRepo this diff was opened against. Falls back to active repo. */
+    private resolveRepo() {
+        if (this.state?.repoId) {
+            return this.plugin.repos.get(this.state.repoId);
+        }
+        return this.plugin.activeRepo();
+    }
+
+    private renderRemovedRepoPlaceholder(missingId: string): void {
+        const container = this.containerEl.children[1];
+        container.empty();
+        const div = container.createDiv({ cls: "obsidian-git-center" });
+        div.createSpan({
+            text: `This diff was opened for repository id "${missingId}", which is no longer registered with the plugin.`,
+        });
+        div.createEl("br");
+        const btn = div.createEl("button", { text: "Close" });
+        btn.addEventListener("click", () => this.leaf.detach());
     }
 
     getViewType(): string {
@@ -175,12 +196,11 @@ export default class SplitDiffView extends ItemView {
     }
 
     async gitShow(commitHash: string, file: string): Promise<string> {
+        const repo = this.resolveRepo();
+        const gitManager = repo?.gitManager;
+        if (!(gitManager instanceof SimpleGit)) return "";
         try {
-            return await (this.plugin.gitManager as SimpleGit).show(
-                commitHash,
-                file,
-                false
-            );
+            return await gitManager.show(commitHash, file, false);
         } catch (error) {
             if (error instanceof GitError) {
                 if (
@@ -205,7 +225,9 @@ export default class SplitDiffView extends ItemView {
         if (this.state.bRef != undefined) {
             return false;
         }
-        const bVaultPath = this.plugin.gitManager.getRelativeVaultPath(
+        const repo = this.resolveRepo();
+        if (!repo) return false;
+        const bVaultPath = repo.gitManager.getRelativeVaultPath(
             this.state.bFile
         );
         return await this.app.vault.adapter.exists(bVaultPath);
@@ -312,9 +334,16 @@ export default class SplitDiffView extends ItemView {
                     "100644",
                     this.state.bRef != undefined
                 ).join("\n") + "\n";
-            await (this.plugin.gitManager as SimpleGit).applyPatch(patch);
+            const repo = this.resolveRepo();
+            const gitManager = repo?.gitManager;
+            if (gitManager instanceof SimpleGit) {
+                await gitManager.applyPatch(patch);
+            }
 
-            this.plugin.app.workspace.trigger("obsidian-git:refresh");
+            this.plugin.app.workspace.trigger(
+                "obsidian-git:refresh",
+                repo?.id
+            );
         };
 
         if (this.state.bRef == undefined) {
@@ -362,12 +391,14 @@ export default class SplitDiffView extends ItemView {
     }
 
     async createMergeView() {
-        if (
-            this.state?.aFile &&
-            this.state?.bFile &&
-            !this.refreshing &&
-            this.plugin.gitManager
-        ) {
+        if (!this.state?.aFile || !this.state?.bFile || this.refreshing) return;
+        const repo = this.resolveRepo();
+        if (this.state.repoId && !repo) {
+            this.renderRemovedRepoPlaceholder(this.state.repoId);
+            return;
+        }
+        if (!repo) return;
+        {
             this.refreshing = true;
 
             // cleanup
@@ -386,7 +417,7 @@ export default class SplitDiffView extends ItemView {
             if (this.state.bRef != undefined) {
                 bText = await this.gitShow(this.state.bRef, this.state.bFile);
             } else {
-                const bVaultPath = this.plugin.gitManager.getRelativeVaultPath(
+                const bVaultPath = repo.gitManager.getRelativeVaultPath(
                     this.state.bFile
                 );
                 if (await this.app.vault.adapter.exists(bVaultPath)) {
@@ -456,7 +487,7 @@ export default class SplitDiffView extends ItemView {
             ]);
 
             const showButtons =
-                this.plugin.gitManager instanceof SimpleGit &&
+                repo.gitManager instanceof SimpleGit &&
                 (this.state.bRef === undefined || this.state.bRef === "");
 
             this.mergeView = new MergeView({

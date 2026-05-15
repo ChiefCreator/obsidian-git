@@ -23,6 +23,7 @@ import type {
     DiffFile,
     FileStatusResult,
     LogEntry,
+    RepoConfig,
     Status,
 } from "../types";
 import { CurrentGitAction, NoNetworkError } from "../types";
@@ -34,8 +35,8 @@ export class SimpleGit extends GitManager {
     absoluteRepoPath: string;
     watchAbortController: AbortController | undefined;
     useDefaultWindowsGitPath: boolean = false;
-    constructor(plugin: ObsidianGit) {
-        super(plugin);
+    constructor(plugin: ObsidianGit, repoConfig: RepoConfig) {
+        super(plugin, repoConfig);
     }
 
     async setGitInstance(ignoreError = false): Promise<void> {
@@ -43,19 +44,16 @@ export class SimpleGit extends GitManager {
             const adapter = this.app.vault.adapter as FileSystemAdapter;
             const vaultBasePath = adapter.getBasePath();
             let basePath = vaultBasePath;
-            // Because the basePath setting is a relative path, a leading `/` must
-            // be appended before concatenating with the path.
-            if (this.plugin.settings.basePath) {
+            if (this.repoConfig.path) {
                 const exists = await adapter.exists(
-                    normalizePath(this.plugin.settings.basePath)
+                    normalizePath(this.repoConfig.path)
                 );
                 if (exists) {
-                    basePath = path.join(
-                        vaultBasePath,
-                        this.plugin.settings.basePath
-                    );
+                    basePath = path.join(vaultBasePath, this.repoConfig.path);
                 } else if (!ignoreError) {
-                    new Notice("ObsidianGit: Base path does not exist");
+                    new Notice(
+                        `ObsidianGit: Path does not exist for repo "${this.repoConfig.displayName}"`
+                    );
                 }
             }
             this.absoluteRepoPath = basePath;
@@ -85,7 +83,7 @@ export class SimpleGit extends GitManager {
             });
             const pathPaths = this.plugin.localStorage.getPATHPaths();
             const envVars = this.plugin.localStorage.getEnvVars();
-            const gitDir = this.plugin.settings.gitDir;
+            const gitDir = this.repoConfig.gitDir;
             const envs = { ...process.env };
             if (pathPaths.length > 0) {
                 const path = pathPaths.join(":") + ":" + envs["PATH"];
@@ -405,9 +403,7 @@ export class SimpleGit extends GitManager {
                     (
                         this.app.vault.adapter as FileSystemAdapter
                     ).getBasePath() +
-                    (this.plugin.settings.basePath
-                        ? "/" + this.plugin.settings.basePath
-                        : "");
+                    (this.repoConfig.path ? "/" + this.repoConfig.path : "");
                 stdout.on("data", (chunk: Buffer) => {
                     body += chunk.toString("utf8");
                 });
@@ -1131,8 +1127,11 @@ export class SimpleGit extends GitManager {
         return this.setGitInstance();
     }
 
-    updateBasePath(_: string): Promise<void> {
-        return this.setGitInstance(true);
+    updateBasePath(basePath: string): Promise<void> {
+        // Path edits go through the repository registry; this method is kept for
+        // legacy compatibility but does nothing. Use `plugin.updateRepoConfig`.
+        void basePath;
+        return Promise.resolve();
     }
 
     async getDiffString(

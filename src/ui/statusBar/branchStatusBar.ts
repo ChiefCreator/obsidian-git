@@ -12,13 +12,18 @@ export class BranchStatusBar {
     }
 
     async display() {
-        if (this.plugin.gitReady) {
-            const branchInfo = await this.plugin.gitManager.branchInfo();
-            if (branchInfo.current != undefined) {
-                this.statusBarEl.setText(branchInfo.current);
-            } else {
-                this.statusBarEl.empty();
-            }
+        const repo = this.plugin.activeRepo();
+        if (!this.plugin.gitReady || !repo || !repo.ready) {
+            this.statusBarEl.empty();
+            return;
+        }
+        const branchInfo = await repo.gitManager
+            .branchInfo()
+            .catch(() => undefined);
+        if (branchInfo?.current != undefined) {
+            const suffix =
+                this.plugin.repos.size > 1 ? ` [${repo.displayName}]` : "";
+            this.statusBarEl.setText(branchInfo.current + suffix);
         } else {
             this.statusBarEl.empty();
         }

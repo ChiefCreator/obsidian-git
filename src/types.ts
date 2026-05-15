@@ -1,13 +1,16 @@
 import type { LineAuthorSettings } from "src/editor/lineAuthor/model";
 
-export interface ObsidianGitSettings {
+/**
+ * Settings that may differ per Git repository registered with the plugin.
+ * Every field has a value in `ObsidianGitSettings.globalRepoDefaults`; a
+ * `RepoConfig.overrides` object may set a subset of these fields to override
+ * the global default for that specific repo.
+ */
+export interface PerRepoSettings {
     commitMessage: string;
     autoCommitMessage: string;
     commitMessageScript: string;
     commitDateFormat: string;
-    /**
-     * Interval to either automatically commit-and-sync or just commit
-     */
     autoSaveInterval: number;
     autoPushInterval: number;
     autoPullInterval: number;
@@ -15,53 +18,46 @@ export interface ObsidianGitSettings {
     autoCommitOnlyStaged: boolean;
     syncMethod: SyncMethod;
     mergeStrategy: MergeStrategy;
-    /**
-     * Whether to push on commit-and-sync
-     */
     disablePush: boolean;
-    /**
-     * Whether to pull on commit-and-sync
-     */
     pullBeforePush: boolean;
-    /**
-     * Whether messages from {@link ObsidianGit.displayMessage} should be shown
-     */
-    disablePopups: boolean;
-    /**
-     * Whether messages from {@link ObsidianGit.displayError} should be shown
-     */
-    showErrorNotices: boolean;
-    disablePopupsForNoChanges: boolean;
-    listChangedFilesInMessageBody: boolean;
-    showStatusBar: boolean;
-    updateSubmodules: boolean;
-    submoduleRecurseCheckout: boolean;
-    /**
-     * @deprecated Using `localstorage` instead
-     */
-    gitPath?: string;
+    differentIntervalCommitAndPush: boolean;
     customMessageOnAutoBackup: boolean;
     autoBackupAfterFileChange: boolean;
-    treeStructure: boolean;
-    /**
-     * @deprecated Using `localstorage` instead
-     */
-    username?: string;
-    differentIntervalCommitAndPush: boolean;
-    changedFilesInStatusBar: boolean;
-
-    /**
-     * @deprecated Migrated to `syncMethod = 'merge'`
-     */
-    mergeOnPull?: boolean;
-    refreshSourceControl: boolean;
-    basePath: string;
-    showedMobileNotice: boolean;
-    refreshSourceControlTimer: number;
-    showBranchStatusBar: boolean;
-    lineAuthor: LineAuthorSettings;
     setLastSaveToLastCommit: boolean;
-    gitDir: string;
+    updateSubmodules: boolean;
+    submoduleRecurseCheckout: boolean;
+    listChangedFilesInMessageBody: boolean;
+}
+
+/**
+ * Persisted configuration for one registered Git repository.
+ */
+export interface RepoConfig {
+    /** Stable UUID generated at add time. */
+    id: string;
+    /** User-editable display name. Defaults to last path segment, or "Vault" for root. */
+    displayName: string;
+    /** Vault-relative path. "" means the vault root. Normalized with `normalizePath`. */
+    path: string;
+    /** Optional GIT_DIR override. Empty/absent means `<path>/.git`. */
+    gitDir?: string;
+    /** Subset of {@link PerRepoSettings} to override the global defaults. Empty `{}` = inherit all. */
+    overrides: Partial<PerRepoSettings>;
+}
+
+export interface ObsidianGitSettings {
+    // ----- Repositories (NEW) -----
+    repos: RepoConfig[];
+    defaultRepoId: string | null;
+    globalRepoDefaults: PerRepoSettings;
+
+    // ----- UI chrome (global) -----
+    showStatusBar: boolean;
+    showBranchStatusBar: boolean;
+    changedFilesInStatusBar: boolean;
+    treeStructure: boolean;
+    refreshSourceControl: boolean;
+    refreshSourceControlTimer: number;
     showFileMenu: boolean;
     authorInHistoryView: ShowAuthorInHistoryView;
     dateInHistoryView: boolean;
@@ -71,17 +67,72 @@ export interface ObsidianGitSettings {
         showSigns: boolean;
         statusBar: "disabled" | "colored" | "monochrome";
     };
+    lineAuthor: LineAuthorSettings;
+
+    // ----- Notifications (global) -----
+    disablePopups: boolean;
+    showErrorNotices: boolean;
+    disablePopupsForNoChanges: boolean;
+
+    // ----- Mobile notice flag (global) -----
+    showedMobileNotice: boolean;
+
+    // ----- Migration flag -----
+    _migratedToMultiRepoV1: boolean;
+
+    // ----- DEPRECATED legacy mirror fields -----
+    // These remain in the settings object as a runtime mirror of the active repo's
+    // effective settings (and basePath/gitDir from its RepoConfig). New code should
+    // read from `repos[].overrides` / `globalRepoDefaults`. The fields stay so legacy
+    // consumer code (settings UI, commands, etc.) continues to work pending a full
+    // rewrite per plan Tasks 13-20.
+    /** @deprecated Mirror of active repo's `config.path`. */
+    basePath: string;
+    /** @deprecated Mirror of active repo's `config.gitDir`. */
+    gitDir: string;
+    /** @deprecated Mirror of active repo's effective `commitMessage`. */
+    commitMessage: string;
+    /** @deprecated */ autoCommitMessage: string;
+    /** @deprecated */ commitMessageScript: string;
+    /** @deprecated */ commitDateFormat: string;
+    /** @deprecated */ autoSaveInterval: number;
+    /** @deprecated */ autoPushInterval: number;
+    /** @deprecated */ autoPullInterval: number;
+    /** @deprecated */ autoPullOnBoot: boolean;
+    /** @deprecated */ autoCommitOnlyStaged: boolean;
+    /** @deprecated */ syncMethod: SyncMethod;
+    /** @deprecated */ mergeStrategy: MergeStrategy;
+    /** @deprecated */ disablePush: boolean;
+    /** @deprecated */ pullBeforePush: boolean;
+    /** @deprecated */ differentIntervalCommitAndPush: boolean;
+    /** @deprecated */ customMessageOnAutoBackup: boolean;
+    /** @deprecated */ autoBackupAfterFileChange: boolean;
+    /** @deprecated */ setLastSaveToLastCommit: boolean;
+    /** @deprecated */ updateSubmodules: boolean;
+    /** @deprecated */ submoduleRecurseCheckout: boolean;
+    /** @deprecated */ listChangedFilesInMessageBody: boolean;
+    /** @deprecated Already deprecated pre-v2. */
+    mergeOnPull?: boolean;
+    /** @deprecated Already deprecated pre-v2. */
+    gitPath?: string;
+    /** @deprecated Already deprecated pre-v2. */
+    username?: string;
 }
 
 /**
  * Ensures, that nested values objects are correctly merged.
  */
 export function mergeSettingsByPriority(
-    low: Omit<ObsidianGitSettings, "autoCommitMessage">,
-    high: ObsidianGitSettings
+    low: ObsidianGitSettings,
+    high: Partial<ObsidianGitSettings>
 ): ObsidianGitSettings {
     const lineAuthor = Object.assign({}, low.lineAuthor, high.lineAuthor);
-    return Object.assign({}, low, high, { lineAuthor });
+    const globalRepoDefaults = Object.assign(
+        {},
+        low.globalRepoDefaults,
+        high.globalRepoDefaults
+    );
+    return Object.assign({}, low, high, { lineAuthor, globalRepoDefaults });
 }
 
 export type SyncMethod = "rebase" | "merge" | "reset";
@@ -293,6 +344,13 @@ export type HistoryRootTreeItem = RootTreeItem<DiffFile>;
 
 export type DiffViewState = {
     /**
+     * Id of the repository this diff was opened against. Undefined values
+     * indicate a pre-multi-repo persisted state and are tolerated for backward
+     * compatibility (the view falls back to the active repo).
+     */
+    repoId?: string;
+
+    /**
      * The repo relative file path for a.
      * For diffing a renamed file, this is the old path.
      */
@@ -353,7 +411,7 @@ declare module "obsidian" {
          */
         on(
             name: "obsidian-git:refreshed",
-            callback: () => void,
+            callback: (repoId?: string) => void,
             ctx?: unknown
         ): EventRef;
         /**
@@ -361,7 +419,7 @@ declare module "obsidian" {
          */
         on(
             name: "obsidian-git:refresh",
-            callback: () => void,
+            callback: (repoId?: string) => void,
             ctx?: unknown
         ): EventRef;
         /**
@@ -369,7 +427,7 @@ declare module "obsidian" {
          */
         on(
             name: "obsidian-git:loading-status",
-            callback: () => void,
+            callback: (repoId?: string) => void,
             ctx?: unknown
         ): EventRef;
         /**
@@ -377,7 +435,7 @@ declare module "obsidian" {
          */
         on(
             name: "obsidian-git:head-change",
-            callback: () => void,
+            callback: (repoId?: string) => void,
             ctx?: unknown
         ): EventRef;
         /**
@@ -385,7 +443,7 @@ declare module "obsidian" {
          */
         on(
             name: "obsidian-git:status-changed",
-            callback: (status: Status) => void,
+            callback: (status: Status, repoId?: string) => void,
             ctx?: unknown
         ): EventRef;
 
@@ -400,11 +458,15 @@ declare module "obsidian" {
             ctx?: unknown
         ): EventRef;
         trigger(name: string, ...data: unknown[]): void;
-        trigger(name: "obsidian-git:refreshed"): void;
-        trigger(name: "obsidian-git:refresh"): void;
-        trigger(name: "obsidian-git:loading-status"): void;
-        trigger(name: "obsidian-git:head-change"): void;
-        trigger(name: "obsidian-git:status-changed", status: Status): void;
+        trigger(name: "obsidian-git:refreshed", repoId?: string): void;
+        trigger(name: "obsidian-git:refresh", repoId?: string): void;
+        trigger(name: "obsidian-git:loading-status", repoId?: string): void;
+        trigger(name: "obsidian-git:head-change", repoId?: string): void;
+        trigger(
+            name: "obsidian-git:status-changed",
+            status: Status,
+            repoId?: string
+        ): void;
         trigger(
             name: "obsidian-git:menu",
             menu: Menu,

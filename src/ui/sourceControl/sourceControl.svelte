@@ -27,7 +27,21 @@
     let loading: boolean = $state(false);
     let status: Status | undefined = $state();
     let lastPulledFiles: FileStatusResult[] = $state([]);
-    let commitMessage = $derived(plugin.settings.commitMessage);
+    let selectedRepoId: string | undefined = $state(undefined);
+    let selectedRepo = $derived(
+        selectedRepoId ? plugin.repos.get(selectedRepoId) : undefined
+    );
+    let commitMessage = $state("");
+    $effect(() => {
+        if (selectedRepoId === undefined) {
+            selectedRepoId = plugin.activeRepo()?.id ?? plugin.repoOrder[0];
+        }
+    });
+    $effect(() => {
+        if (!commitMessage) {
+            commitMessage = plugin.settings.globalRepoDefaults.commitMessage;
+        }
+    });
     let buttons: HTMLElement[] = $state([]);
     let changeHierarchy: StatusRootTreeItem | undefined = $state();
     let stagedHierarchy: StatusRootTreeItem | undefined = $state();
@@ -41,6 +55,13 @@
     let pulledClosed: Record<string, boolean> = $state({});
 
     let showTree = $derived(plugin.settings.treeStructure);
+
+    $effect(() => {
+        // When the active repo override changes (e.g. via Switch active repo
+        // command), keep this view's selected repo aligned.
+        const id = plugin.activeRepo()?.id ?? plugin.repoOrder[0];
+        if (id && id !== selectedRepoId) selectedRepoId = id;
+    });
     onMount(() => {
         view.registerEvent(
             view.app.workspace.on(
@@ -54,8 +75,10 @@
                 () => void refresh().catch(console.error)
             )
         );
-        if (view.plugin.cachedStatus == undefined) {
-            view.plugin.refresh().catch(console.error);
+        if (!selectedRepo?.cachedStatus) {
+            view.plugin
+                .refresh(selectedRepo?.id)
+                .catch(console.error);
         } else {
             refresh().catch(console.error);
         }
@@ -93,12 +116,21 @@
 
     function commit() {
         loading = true;
-        if (status) {
+        const repo = selectedRepo;
+        if (status && repo) {
             const onlyStaged = status.staged.length > 0;
-            plugin.promiseQueue.addTask(() =>
+            repo.promiseQueue.addTask(() =>
                 plugin
-                    .commit({ fromAuto: false, commitMessage, onlyStaged })
-                    .then(() => (commitMessage = plugin.settings.commitMessage))
+                    .commitRepo(repo, {
+                        fromAuto: false,
+                        commitMessage,
+                        onlyStaged,
+                    })
+                    .then(
+                        () =>
+                            (commitMessage =
+                                plugin.settings.globalRepoDefaults.commitMessage)
+                    )
                     .finally(triggerRefresh)
             );
         }
@@ -106,19 +138,19 @@
 
     function commitAndSync() {
         loading = true;
-        if (status) {
-            // If staged files exist only commit them, but if not, commit all.
-            // I hope this is the most intuitive way.
+        const repo = selectedRepo;
+        if (status && repo) {
             const onlyStaged = status.staged.length > 0;
-            plugin.promiseQueue.addTask(() =>
+            repo.promiseQueue.addTask(() =>
                 plugin
-                    .commitAndSync({
+                    .commitAndSyncRepo(repo, {
                         fromAutoBackup: false,
                         commitMessage,
                         onlyStaged,
                     })
                     .then(() => {
-                        commitMessage = plugin.settings.commitMessage;
+                        commitMessage =
+                            plugin.settings.globalRepoDefaults.commitMessage;
                     })
                     .finally(triggerRefresh)
             );
@@ -126,27 +158,14 @@
     }
 
     async function refresh(): Promise<void> {
-        if (!plugin.gitReady) {
+        if (!plugin.gitReady || !selectedRepo) {
             status = undefined;
             return;
         }
-        unPushedCommits = await plugin.gitManager.getUnpushedCommits();
+        unPushedCommits = await selectedRepo.gitManager.getUnpushedCommits();
 
-        status = plugin.cachedStatus;
+        status = selectedRepo.cachedStatus;
         loading = false;
-        if (
-            plugin.lastPulledFiles &&
-            plugin.lastPulledFiles != lastPulledFiles
-        ) {
-            lastPulledFiles = plugin.lastPulledFiles;
-
-            lastPulledFilesHierarchy = {
-                title: "",
-                path: "",
-                vaultPath: "",
-                children: plugin.gitManager.getTreeStructure(lastPulledFiles),
-            };
-        }
         if (status) {
             const sort = (a: FileStatusResult, b: FileStatusResult) => {
                 return a.vaultPath
@@ -160,13 +179,17 @@
                 title: "",
                 path: "",
                 vaultPath: "",
-                children: plugin.gitManager.getTreeStructure(status.changed),
+                children: selectedRepo.gitManager.getTreeStructure(
+                    status.changed
+                ),
             };
             stagedHierarchy = {
                 title: "",
                 path: "",
                 vaultPath: "",
-                children: plugin.gitManager.getTreeStructure(status.staged),
+                children: selectedRepo.gitManager.getTreeStructure(
+                    status.staged
+                ),
             };
         } else {
             changeHierarchy = undefined;
@@ -175,24 +198,26 @@
     }
 
     function triggerRefresh() {
-        view.app.workspace.trigger("obsidian-git:refresh");
+        view.app.workspace.trigger("obsidian-git:refresh", selectedRepo?.id);
     }
 
     function stageAll(event: MouseEvent) {
         event.stopPropagation();
         loading = true;
-        plugin.promiseQueue.addTask(() =>
-            plugin.gitManager
-                .stageAll({ status: status })
-                .finally(triggerRefresh)
+        const repo = selectedRepo;
+        if (!repo) return;
+        repo.promiseQueue.addTask(() =>
+            repo.gitManager.stageAll({ status: status }).finally(triggerRefresh)
         );
     }
 
     function unstageAll(event: MouseEvent) {
         event.stopPropagation();
         loading = true;
-        plugin.promiseQueue.addTask(() =>
-            plugin.gitManager
+        const repo = selectedRepo;
+        if (!repo) return;
+        repo.promiseQueue.addTask(() =>
+            repo.gitManager
                 .unstageAll({ status: status })
                 .finally(triggerRefresh)
         );
@@ -200,19 +225,34 @@
 
     function push() {
         loading = true;
-        plugin.promiseQueue.addTask(() =>
-            plugin.push().finally(triggerRefresh)
+        const repo = selectedRepo;
+        if (!repo) return;
+        repo.promiseQueue.addTask(() =>
+            plugin.pushRepo(repo).finally(triggerRefresh)
         );
     }
     function pull() {
         loading = true;
-        plugin.promiseQueue.addTask(() =>
-            plugin.pullChangesFromRemote().finally(triggerRefresh)
+        const repo = selectedRepo;
+        if (!repo) return;
+        repo.promiseQueue.addTask(() =>
+            plugin.pullRepoFromRemote(repo).finally(triggerRefresh)
         );
     }
     function discard(event: Event) {
         event.stopPropagation();
         void plugin.discardAll();
+    }
+
+    function commitAndSyncAll() {
+        loading = true;
+        for (const r of plugin.repos.values()) {
+            r.promiseQueue.addTask(() =>
+                plugin
+                    .commitAndSyncRepo(r, { fromAutoBackup: false })
+                    .finally(triggerRefresh)
+            );
+        }
     }
 
     let rows = $derived((commitMessage.match(/\n/g) || []).length + 1 || 1);
@@ -295,6 +335,29 @@
             ></div>
         </div>
     </div>
+    {#if plugin.repos.size > 1}
+        <div
+            class="git-repo-picker"
+            style="padding: 4px 8px; display: flex; gap: 6px; align-items: center;"
+        >
+            <label for="git-repo-select">Repo:</label>
+            <select id="git-repo-select" bind:value={selectedRepoId}>
+                {#each plugin.repoOrder as id (id)}
+                    {@const r = plugin.repos.get(id)}
+                    {#if r}
+                        <option value={r.id}>{r.displayName}</option>
+                    {/if}
+                {/each}
+            </select>
+            <button
+                style="margin-left: auto;"
+                aria-label="Commit-and-sync all repos"
+                onclick={commitAndSyncAll}
+            >
+                Sync all
+            </button>
+        </div>
+    {/if}
     <div class="git-commit-msg">
         <textarea
             {rows}

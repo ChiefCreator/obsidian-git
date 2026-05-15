@@ -1,12 +1,21 @@
+import type { Debouncer } from "obsidian";
 import { debounce } from "obsidian";
+import type { GitRepo } from "./gitRepo";
 import type ObsidianGit from "./main";
 
 export default class AutomaticsManager {
     private timeoutIDCommitAndSync?: number;
     private timeoutIDPush?: number;
     private timeoutIDPull?: number;
+    readonly plugin: ObsidianGit;
+    readonly repo: GitRepo;
+    /** Per-repo debouncer for the auto commit after file changes. */
+    autoCommitDebouncer: Debouncer<[], void> | undefined;
 
-    constructor(private readonly plugin: ObsidianGit) {}
+    constructor(repo: GitRepo) {
+        this.repo = repo;
+        this.plugin = repo.plugin;
+    }
 
     private saveLastAuto(date: Date, mode: "backup" | "pull" | "push") {
         if (mode === "backup") {
@@ -33,18 +42,18 @@ export default class AutomaticsManager {
         const lastAutos = this.loadLastAuto();
 
         if (
-            this.plugin.settings.differentIntervalCommitAndPush &&
-            this.plugin.settings.autoPushInterval > 0
+            this.repo.settings.differentIntervalCommitAndPush &&
+            this.repo.settings.autoPushInterval > 0
         ) {
             const diff = this.diff(
-                this.plugin.settings.autoPushInterval,
+                this.repo.settings.autoPushInterval,
                 lastAutos.push
             );
             this.startAutoPush(diff);
         }
-        if (this.plugin.settings.autoPullInterval > 0) {
+        if (this.repo.settings.autoPullInterval > 0) {
             const diff = this.diff(
-                this.plugin.settings.autoPullInterval,
+                this.repo.settings.autoPullInterval,
                 lastAutos.pull
             );
             this.startAutoPull(diff);
@@ -65,28 +74,30 @@ export default class AutomaticsManager {
      */
     reload(...type: ("commit" | "push" | "pull")[]) {
         if (this.plugin.localStorage.getPausedAutomatics()) return;
+        if (this.plugin.localStorage.isAutomaticsPausedForRepo(this.repo.id))
+            return;
 
         if (type.contains("commit")) {
             this.clearAutoCommitAndSync();
-            if (this.plugin.settings.autoSaveInterval > 0) {
+            if (this.repo.settings.autoSaveInterval > 0) {
                 this.startAutoCommitAndSync(
-                    this.plugin.settings.autoSaveInterval
+                    this.repo.settings.autoSaveInterval
                 );
             }
         }
         if (type.contains("push")) {
             this.clearAutoPush();
             if (
-                this.plugin.settings.differentIntervalCommitAndPush &&
-                this.plugin.settings.autoPushInterval > 0
+                this.repo.settings.differentIntervalCommitAndPush &&
+                this.repo.settings.autoPushInterval > 0
             ) {
-                this.startAutoPush(this.plugin.settings.autoPushInterval);
+                this.startAutoPush(this.repo.settings.autoPushInterval);
             }
         }
         if (type.contains("pull")) {
             this.clearAutoPull();
-            if (this.plugin.settings.autoPullInterval > 0) {
-                this.startAutoPull(this.plugin.settings.autoPullInterval);
+            if (this.repo.settings.autoPullInterval > 0) {
+                this.startAutoPull(this.repo.settings.autoPullInterval);
             }
         }
     }
@@ -98,21 +109,21 @@ export default class AutomaticsManager {
      * is set to the last commit time.
      */
     private async setUpAutoCommitAndSync() {
-        if (this.plugin.settings.setLastSaveToLastCommit) {
+        if (this.repo.settings.setLastSaveToLastCommit) {
             this.clearAutoCommitAndSync();
             const lastCommitDate =
-                await this.plugin.gitManager.getLastCommitTime();
+                await this.repo.gitManager.getLastCommitTime();
             if (lastCommitDate) {
                 this.saveLastAuto(lastCommitDate, "backup");
             }
         }
 
-        if (!this.timeoutIDCommitAndSync && !this.plugin.autoCommitDebouncer) {
+        if (!this.timeoutIDCommitAndSync && !this.autoCommitDebouncer) {
             const lastAutos = this.loadLastAuto();
 
-            if (this.plugin.settings.autoSaveInterval > 0) {
+            if (this.repo.settings.autoSaveInterval > 0) {
                 const diff = this.diff(
-                    this.plugin.settings.autoSaveInterval,
+                    this.repo.settings.autoSaveInterval,
                     lastAutos.backup
                 );
                 this.startAutoCommitAndSync(diff);
@@ -121,12 +132,12 @@ export default class AutomaticsManager {
     }
 
     private startAutoCommitAndSync(minutes?: number) {
-        let time = (minutes ?? this.plugin.settings.autoSaveInterval) * 60000;
-        if (this.plugin.settings.autoBackupAfterFileChange) {
+        let time = (minutes ?? this.repo.settings.autoSaveInterval) * 60000;
+        if (this.repo.settings.autoBackupAfterFileChange) {
             if (minutes === 0) {
                 this.doAutoCommitAndSync();
             } else {
-                this.plugin.autoCommitDebouncer = debounce(
+                this.autoCommitDebouncer = debounce(
                     () => this.doAutoCommitAndSync(),
                     time,
                     true
@@ -144,17 +155,17 @@ export default class AutomaticsManager {
 
     // This is used for both auto commit-and-sync and commit only
     private doAutoCommitAndSync(): void {
-        this.plugin.promiseQueue.addTask(
+        this.repo.promiseQueue.addTask(
             async () => {
                 // Re-check if the auto commit should run now or be postponed,
                 // because the last commit time has changed
-                if (this.plugin.settings.setLastSaveToLastCommit) {
+                if (this.repo.settings.setLastSaveToLastCommit) {
                     const lastCommitDate =
-                        await this.plugin.gitManager.getLastCommitTime();
+                        await this.repo.gitManager.getLastCommitTime();
                     if (lastCommitDate) {
                         this.saveLastAuto(lastCommitDate, "backup");
                         const diff = this.diff(
-                            this.plugin.settings.autoSaveInterval,
+                            this.repo.settings.autoSaveInterval,
                             lastCommitDate
                         );
                         if (diff > 0) {
@@ -165,11 +176,14 @@ export default class AutomaticsManager {
                         }
                     }
                 }
-                const onlyStaged = this.plugin.settings.autoCommitOnlyStaged;
-                if (this.plugin.settings.differentIntervalCommitAndPush) {
-                    await this.plugin.commit({ fromAuto: true, onlyStaged });
+                const onlyStaged = this.repo.settings.autoCommitOnlyStaged;
+                if (this.repo.settings.differentIntervalCommitAndPush) {
+                    await this.plugin.commitRepo(this.repo, {
+                        fromAuto: true,
+                        onlyStaged,
+                    });
                 } else {
-                    await this.plugin.commitAndSync({
+                    await this.plugin.commitAndSyncRepo(this.repo, {
                         fromAutoBackup: true,
                         onlyStaged,
                     });
@@ -187,7 +201,7 @@ export default class AutomaticsManager {
     }
 
     private startAutoPull(minutes?: number) {
-        let time = (minutes ?? this.plugin.settings.autoPullInterval) * 60000;
+        let time = (minutes ?? this.repo.settings.autoPullInterval) * 60000;
         // max timeout in js
         if (time > 2147483647) time = 2147483647;
 
@@ -195,8 +209,8 @@ export default class AutomaticsManager {
     }
 
     private doAutoPull(): void {
-        this.plugin.promiseQueue.addTask(
-            () => this.plugin.pullChangesFromRemote(),
+        this.repo.promiseQueue.addTask(
+            () => this.plugin.pullRepoFromRemote(this.repo),
             () => {
                 this.saveLastAuto(new Date(), "pull");
                 this.startAutoPull();
@@ -205,7 +219,7 @@ export default class AutomaticsManager {
     }
 
     private startAutoPush(minutes?: number) {
-        let time = (minutes ?? this.plugin.settings.autoPushInterval) * 60000;
+        let time = (minutes ?? this.repo.settings.autoPushInterval) * 60000;
         // max timeout in js
         if (time > 2147483647) time = 2147483647;
 
@@ -213,8 +227,8 @@ export default class AutomaticsManager {
     }
 
     private doAutoPush(): void {
-        this.plugin.promiseQueue.addTask(
-            () => this.plugin.push(),
+        this.repo.promiseQueue.addTask(
+            () => this.plugin.pushRepo(this.repo),
             () => {
                 this.saveLastAuto(new Date(), "push");
                 this.startAutoPush();
@@ -229,9 +243,9 @@ export default class AutomaticsManager {
             this.timeoutIDCommitAndSync = undefined;
             wasActive = true;
         }
-        if (this.plugin.autoCommitDebouncer) {
-            this.plugin.autoCommitDebouncer?.cancel();
-            this.plugin.autoCommitDebouncer = undefined;
+        if (this.autoCommitDebouncer) {
+            this.autoCommitDebouncer?.cancel();
+            this.autoCommitDebouncer = undefined;
             wasActive = true;
         }
         return wasActive;

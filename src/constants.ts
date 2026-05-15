@@ -9,38 +9,39 @@ export const GIT_LINE_AUTHORING_MOVEMENT_DETECTION_MINIMAL_LENGTH = 40;
 export const CONFLICT_OUTPUT_FILE = "conflict-files-obsidian-git.md";
 
 export const DEFAULT_SETTINGS: ObsidianGitSettings = {
-    commitMessage: "vault backup: {{date}}",
-    autoCommitMessage: "vault backup: {{date}}",
-    commitMessageScript: "",
-    commitDateFormat: DATE_TIME_FORMAT_SECONDS,
-    autoSaveInterval: 0,
-    autoPushInterval: 0,
-    autoPullInterval: 0,
-    autoPullOnBoot: false,
-    autoCommitOnlyStaged: false,
-    disablePush: false,
-    pullBeforePush: true,
-    disablePopups: false,
-    showErrorNotices: true,
-    disablePopupsForNoChanges: false,
-    listChangedFilesInMessageBody: false,
+    // Repositories
+    repos: [],
+    defaultRepoId: null,
+    globalRepoDefaults: {
+        commitMessage: "vault backup: {{date}}",
+        autoCommitMessage: "vault backup: {{date}}",
+        commitMessageScript: "",
+        commitDateFormat: DATE_TIME_FORMAT_SECONDS,
+        autoSaveInterval: 0,
+        autoPushInterval: 0,
+        autoPullInterval: 0,
+        autoPullOnBoot: false,
+        autoCommitOnlyStaged: false,
+        syncMethod: "merge",
+        mergeStrategy: "none",
+        disablePush: false,
+        pullBeforePush: true,
+        differentIntervalCommitAndPush: false,
+        customMessageOnAutoBackup: false,
+        autoBackupAfterFileChange: false,
+        setLastSaveToLastCommit: false,
+        updateSubmodules: false,
+        submoduleRecurseCheckout: false,
+        listChangedFilesInMessageBody: false,
+    },
+
+    // UI chrome
     showStatusBar: true,
-    updateSubmodules: false,
-    syncMethod: "merge",
-    mergeStrategy: "none",
-    customMessageOnAutoBackup: false,
-    autoBackupAfterFileChange: false,
+    showBranchStatusBar: true,
+    changedFilesInStatusBar: false,
     treeStructure: false,
     refreshSourceControl: Platform.isDesktopApp,
-    basePath: "",
-    differentIntervalCommitAndPush: false,
-    changedFilesInStatusBar: false,
-    showedMobileNotice: false,
     refreshSourceControlTimer: 7000,
-    showBranchStatusBar: true,
-    setLastSaveToLastCommit: false,
-    submoduleRecurseCheckout: false,
-    gitDir: "",
     showFileMenu: true,
     authorInHistoryView: "hide",
     dateInHistoryView: false,
@@ -66,6 +67,42 @@ export const DEFAULT_SETTINGS: ObsidianGitSettings = {
         textColorCss: "var(--text-muted)", //  more pronounced than line numbers, but less than the content text
         ignoreWhitespace: false,
     },
+
+    // Notifications
+    disablePopups: false,
+    showErrorNotices: true,
+    disablePopupsForNoChanges: false,
+
+    // Mobile
+    showedMobileNotice: false,
+
+    // Migration
+    _migratedToMultiRepoV1: false,
+
+    // Legacy mirror fields (kept for backwards compatibility with existing UI/code).
+    // These are kept in sync with the active repo's effective settings.
+    basePath: "",
+    gitDir: "",
+    commitMessage: "vault backup: {{date}}",
+    autoCommitMessage: "vault backup: {{date}}",
+    commitMessageScript: "",
+    commitDateFormat: DATE_TIME_FORMAT_SECONDS,
+    autoSaveInterval: 0,
+    autoPushInterval: 0,
+    autoPullInterval: 0,
+    autoPullOnBoot: false,
+    autoCommitOnlyStaged: false,
+    syncMethod: "merge",
+    mergeStrategy: "none",
+    disablePush: false,
+    pullBeforePush: true,
+    differentIntervalCommitAndPush: false,
+    customMessageOnAutoBackup: false,
+    autoBackupAfterFileChange: false,
+    setLastSaveToLastCommit: false,
+    updateSubmodules: false,
+    submoduleRecurseCheckout: false,
+    listChangedFilesInMessageBody: false,
 };
 
 export const SOURCE_CONTROL_VIEW_CONFIG = {

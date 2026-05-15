@@ -2,6 +2,7 @@ import type { Extension } from "@codemirror/state";
 import { Prec } from "@codemirror/state";
 import type { TFile } from "obsidian";
 import { eventsPerFilePathSingleton } from "src/editor/eventsPerFilepath";
+import { SimpleGit } from "src/gitManager/simpleGit";
 import type {
     LineAuthoring,
     LineAuthoringId,
@@ -56,9 +57,9 @@ export class LineAuthorProvider {
     }
 
     private async computeLineAuthorInfo(filepath: string) {
-        const gitManager =
-            this.plugin.editorIntegration.lineAuthoringFeature.isAvailableOnCurrentPlatform()
-                .gitManager;
+        const repo = this.plugin.repoForVaultPath(filepath);
+        if (!repo || !(repo.gitManager instanceof SimpleGit)) return;
+        const gitManager = repo.gitManager;
 
         const headRevision =
             await gitManager.submoduleAwareHeadRevisonInContainingDirectory(

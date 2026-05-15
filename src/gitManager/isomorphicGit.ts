@@ -16,6 +16,7 @@ import type {
     BranchInfo,
     FileStatusResult,
     LogEntry,
+    RepoConfig,
     Status,
     UnstagedFile,
     WalkDifference,
@@ -52,10 +53,11 @@ export class IsomorphicGit extends GitManager {
         "123": "MM",
     };
     private readonly noticeLength = 999_999;
-    private readonly fs = new MyAdapter(this.app.vault, this.plugin);
+    private readonly fs: MyAdapter;
 
-    constructor(plugin: ObsidianGit) {
-        super(plugin);
+    constructor(plugin: ObsidianGit, repoConfig: RepoConfig) {
+        super(plugin, repoConfig);
+        this.fs = new MyAdapter(this.app.vault, this);
     }
 
     getRepo(): {
@@ -68,8 +70,8 @@ export class IsomorphicGit extends GitManager {
     } {
         return {
             fs: this.fs,
-            dir: this.plugin.settings.basePath,
-            gitdir: this.plugin.settings.gitDir || undefined,
+            dir: this.repoConfig.path,
+            gitdir: this.repoConfig.gitDir || undefined,
             onAuth: () => {
                 return {
                     username:
@@ -904,7 +906,9 @@ export class IsomorphicGit extends GitManager {
     }
 
     updateBasePath(basePath: string): Promise<void> {
-        this.getRepo().dir = basePath;
+        // Path edits go through the repository registry; this method is kept for
+        // legacy compatibility but does nothing. Use `plugin.updateRepoConfig`.
+        void basePath;
         return Promise.resolve();
     }
 

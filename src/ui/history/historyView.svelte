@@ -17,6 +17,12 @@
     let buttons: HTMLElement[] = $state([]);
     let logs: LogEntry[] | undefined = $state();
     let showTree: boolean = $state(plugin.settings.treeStructure);
+    let selectedRepoId: string | undefined = $state(
+        plugin.activeRepo()?.id ?? plugin.repoOrder[0]
+    );
+    let selectedRepo = $derived(
+        selectedRepoId ? plugin.repos.get(selectedRepoId) : undefined
+    );
 
     let layoutBtn: HTMLElement | undefined = $state();
 
@@ -55,44 +61,46 @@
         };
     });
 
-    refresh().catch(console.error);
+    $effect(() => {
+        // re-fetch logs when selected repo changes
+        void selectedRepoId;
+        refresh().catch(console.error);
+    });
 
     function triggerRefresh() {
         refresh().catch(console.error);
     }
 
     async function refresh() {
-        if (!plugin.gitReady) {
+        if (!plugin.gitReady || !selectedRepo) {
             logs = undefined;
             return;
         }
         loading = true;
-        const isSimpleGit = plugin.gitManager instanceof SimpleGit;
+        const isSimpleGit = selectedRepo.gitManager instanceof SimpleGit;
         let limit;
         if ((logs?.length ?? 0) == 0) {
             limit = isSimpleGit ? 50 : 10;
         } else {
             limit = logs!.length;
         }
-        logs = await plugin.gitManager.log(undefined, false, limit);
+        logs = await selectedRepo.gitManager.log(undefined, false, limit);
         loading = false;
     }
 
     async function appendLogs() {
-        if (!plugin.gitReady || logs === undefined) {
+        if (!plugin.gitReady || logs === undefined || !selectedRepo) {
             return;
         }
         loading = true;
-        const isSimpleGit = plugin.gitManager instanceof SimpleGit;
+        const isSimpleGit = selectedRepo.gitManager instanceof SimpleGit;
         const limit = isSimpleGit ? 50 : 10;
-        const newLogs = await plugin.gitManager.log(
+        const newLogs = await selectedRepo.gitManager.log(
             undefined,
             false,
             limit,
             logs.last()?.hash
         );
-        // Remove the first element of the new logs, as it is the same as the last element of the current logs.
-        // And don't use hash^ as it fails for the first commit.
         logs.push(...newLogs.slice(1));
         loading = false;
     }
@@ -127,6 +135,23 @@
             ></div>
         </div>
     </div>
+
+    {#if plugin.repos.size > 1}
+        <div
+            class="history-view-repo-picker"
+            style="padding: 4px 8px; display: flex; gap: 6px; align-items: center;"
+        >
+            <label for="history-repo-select">Repo:</label>
+            <select id="history-repo-select" bind:value={selectedRepoId}>
+                {#each plugin.repoOrder as id (id)}
+                    {@const r = plugin.repos.get(id)}
+                    {#if r}
+                        <option value={r.id}>{r.displayName}</option>
+                    {/if}
+                {/each}
+            </select>
+        </div>
+    {/if}
 
     <div class="nav-files-container" style="position: relative;">
         {#if logs}

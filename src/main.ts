@@ -19,7 +19,8 @@ import { PromiseQueue } from "src/promiseQueue";
 import { ObsidianGitSettingsTab } from "src/setting/settings";
 import { StatusBar } from "src/statusBar";
 import { CustomMessageModal } from "src/ui/modals/customMessageModal";
-import AutomaticsManager from "./automaticsManager";
+import { GitRepo } from "./gitRepo";
+import type AutomaticsManager from "./automaticsManager";
 import { addCommmands } from "./commands";
 import {
     CONFLICT_OUTPUT_FILE,
@@ -37,8 +38,11 @@ import Tools from "./tools";
 import type {
     FileStatusResult,
     ObsidianGitSettings,
+    PerRepoSettings,
     PluginState,
+    RepoConfig,
     Status,
+    SyncMethod,
     UnstagedFile,
 } from "./types";
 import {
@@ -46,6 +50,13 @@ import {
     mergeSettingsByPriority,
     NoNetworkError,
 } from "./types";
+import {
+    defaultDisplayName,
+    newRepoId,
+    normalizeRepoPath,
+    repoPathsOverlap,
+    vaultPathInRepo,
+} from "./utils/repoPath";
 import DiffView from "./ui/diff/diffView";
 import SplitDiffView from "./ui/diff/splitDiffView";
 import HistoryView from "./ui/history/historyView";
@@ -65,8 +76,24 @@ import { HunkActions } from "./editor/signs/hunkActions";
 import { EditorIntegration } from "./editor/editorIntegration";
 
 export default class ObsidianGit extends Plugin {
-    gitManager: GitManager;
-    automaticsManager = new AutomaticsManager(this);
+    /** All registered repos, keyed by id. */
+    repos: Map<string, GitRepo> = new Map();
+    /** Stable display order matching `settings.repos`. */
+    repoOrder: string[] = [];
+    /** Per-repo debouncers for source-control refresh. */
+    repoDebouncers: Map<string, Debouncer<[], void>> = new Map();
+
+    /**
+     * @deprecated Use `repoForFile` / `activeRepo` instead.
+     * Retained as a compatibility shim. Returns the gitManager of `activeRepo()`.
+     */
+    get gitManager(): GitManager {
+        const repo = this.activeRepo();
+        // Type assertion because callers expect non-null; if no repo is registered
+        // upstream methods short-circuit via gitReady.
+        return repo?.gitManager as GitManager;
+    }
+
     tools = new Tools(this);
     localStorage = new LocalStorageSettings(this);
     settings: ObsidianGitSettings;
@@ -79,13 +106,44 @@ export default class ObsidianGit extends Plugin {
     };
     lastPulledFiles: FileStatusResult[];
     gitReady = false;
-    promiseQueue: PromiseQueue = new PromiseQueue(this);
 
     /**
-     * Debouncer for the auto commit after file changes.
+     * @deprecated Use `repo.promiseQueue` instead. Shim that targets the active repo.
      */
-    autoCommitDebouncer: Debouncer<[], void> | undefined;
-    cachedStatus: Status | undefined;
+    get promiseQueue(): PromiseQueue {
+        return this.activeRepo()?.promiseQueue ?? this._fallbackQueue;
+    }
+    private _fallbackQueue: PromiseQueue = new PromiseQueue(this);
+
+    /**
+     * @deprecated Use `repo.cachedStatus` instead. Shim that targets the active repo.
+     */
+    get cachedStatus(): Status | undefined {
+        return this.activeRepo()?.cachedStatus;
+    }
+    set cachedStatus(value: Status | undefined) {
+        const repo = this.activeRepo();
+        if (repo) repo.cachedStatus = value;
+    }
+
+    /**
+     * @deprecated Use `repo.automatics` instead. Shim that targets the active repo.
+     */
+    get automaticsManager(): AutomaticsManager | undefined {
+        return this.activeRepo()?.automatics;
+    }
+
+    /**
+     * @deprecated Debouncer is now per-repo (`repo.automatics.autoCommitDebouncer`).
+     */
+    get autoCommitDebouncer(): Debouncer<[], void> | undefined {
+        return this.activeRepo()?.automatics.autoCommitDebouncer;
+    }
+    set autoCommitDebouncer(value: Debouncer<[], void> | undefined) {
+        const repo = this.activeRepo();
+        if (repo) repo.automatics.autoCommitDebouncer = value;
+    }
+
     // Used to store the path of the file that is currently shown in the diff view.
     lastDiffViewState: Record<string, unknown> | undefined;
     intervalsToClear: number[] = [];
@@ -93,52 +151,283 @@ export default class ObsidianGit extends Plugin {
     hunkActions = new HunkActions(this);
 
     /**
-     * Debouncer for the refresh of the git status for the source control view after file changes.
+     * @deprecated Debouncer is now per-repo (`repo.fileEventDebouncer`).
+     * Shim returns the active repo's debouncer when present.
      */
-    debRefresh: Debouncer<[], void>;
+    get debRefresh(): Debouncer<[], void> | undefined {
+        return this.activeRepo()?.fileEventDebouncer;
+    }
 
     setPluginState(state: Partial<PluginState>): void {
         this.state = Object.assign(this.state, state);
+        // Mirror onto active repo for consistency
+        const repo = this.activeRepo();
+        if (repo) repo.state = Object.assign(repo.state, state);
         this.statusBar?.display();
     }
 
-    async updateCachedStatus(): Promise<Status> {
-        this.app.workspace.trigger("obsidian-git:loading-status");
-        this.cachedStatus = await this.gitManager.status();
-        if (this.cachedStatus.conflicted.length > 0) {
-            this.localStorage.setConflict(true);
-            await this.branchBar?.display();
-        } else {
-            this.localStorage.setConflict(false);
-            await this.branchBar?.display();
+    /**
+     * Longest-prefix lookup of the repo that owns `vaultPath`.
+     * `""` (root) is the last-resort match.
+     */
+    repoForVaultPath(vaultPath: string): GitRepo | undefined {
+        const candidates: GitRepo[] = [];
+        for (const repo of this.repos.values()) {
+            if (vaultPathInRepo(vaultPath, repo.config.path)) {
+                candidates.push(repo);
+            }
         }
-
-        this.app.workspace.trigger(
-            "obsidian-git:status-changed",
-            this.cachedStatus
-        );
-        return this.cachedStatus;
+        if (candidates.length === 0) return undefined;
+        candidates.sort((a, b) => b.config.path.length - a.config.path.length);
+        return candidates[0];
     }
 
-    async refresh() {
-        if (!this.gitReady) return;
+    repoForFile(file: TAbstractFile | null | undefined): GitRepo | undefined {
+        if (!file) return undefined;
+        return this.repoForVaultPath(file.path);
+    }
 
+    /**
+     * Resolve the "active" repo for repo-targeted commands.
+     * 1. localStorage override (if the repo still exists)
+     * 2. repo of the currently active file
+     * 3. configured default repo
+     * 4. undefined
+     */
+    activeRepo(): GitRepo | undefined {
+        const overrideId = this.localStorage.getActiveRepoOverride();
+        if (overrideId) {
+            const repo = this.repos.get(overrideId);
+            if (repo) return repo;
+            this.localStorage.setActiveRepoOverride(null);
+        }
+        const activeFile = this.app.workspace.getActiveFile();
+        if (activeFile) {
+            const repo = this.repoForFile(activeFile);
+            if (repo) return repo;
+        }
+        const defaultId = this.settings.defaultRepoId;
+        if (defaultId) {
+            const repo = this.repos.get(defaultId);
+            if (repo) return repo;
+        }
+        // Fall back to the first repo if nothing else matches.
+        return this.repos.values().next().value as GitRepo | undefined;
+    }
+
+    /**
+     * Build a fresh GitRepo from a RepoConfig, register it, init it, surface errors.
+     * Does not save settings (caller is responsible for persistence).
+     */
+    async registerRepo(config: RepoConfig): Promise<GitRepo> {
+        const repo = new GitRepo(this, config);
+        const result = await repo.init();
+        switch (result) {
+            case "missing-git":
+                this.displayError(
+                    `[${config.displayName}] Cannot run git command. Trying to run: '${
+                        this.localStorage.getGitPath() || "git"
+                    }'.`
+                );
+                break;
+            case "missing-repo":
+                new Notice(
+                    `[${config.displayName}] No valid git repository at "${config.path || "<vault root>"}". Initialize or clone first.`,
+                    10000
+                );
+                break;
+        }
+        this.repos.set(repo.id, repo);
+        if (!this.repoOrder.includes(repo.id)) {
+            this.repoOrder.push(repo.id);
+        }
+        this.setRepoDebouncer(repo);
+        if (repo.ready) {
+            const pausedGlobal = this.localStorage.getPausedAutomatics();
+            const pausedRepo = this.localStorage.isAutomaticsPausedForRepo(
+                repo.id
+            );
+            if (!pausedGlobal && !pausedRepo) {
+                await repo.automatics.init();
+            }
+        }
+        return repo;
+    }
+
+    /** Remove a repo at runtime. Caller is responsible for saving settings. */
+    unregisterRepo(id: string): void {
+        const repo = this.repos.get(id);
+        if (!repo) return;
+        this.repoDebouncers.get(id)?.cancel();
+        this.repoDebouncers.delete(id);
+        repo.unload();
+        this.repos.delete(id);
+        const idx = this.repoOrder.indexOf(id);
+        if (idx >= 0) this.repoOrder.splice(idx, 1);
+        // Reassign default if needed.
+        if (this.settings.defaultRepoId === id) {
+            this.settings.defaultRepoId = this.repoOrder[0] ?? null;
+        }
+    }
+
+    setRepoDebouncer(repo: GitRepo): void {
+        const existing = this.repoDebouncers.get(repo.id);
+        existing?.cancel();
+        const debouncer = debounce(
+            () => {
+                if (this.settings.refreshSourceControl) {
+                    this.refresh(repo.id).catch(console.error);
+                }
+            },
+            this.settings.refreshSourceControlTimer,
+            true
+        );
+        this.repoDebouncers.set(repo.id, debouncer);
+        repo.fileEventDebouncer = debouncer;
+    }
+
+    async pullRepoFromRemote(repo: GitRepo): Promise<void> {
+        if (!repo.ready) return;
+        try {
+            const filesUpdated = await repo.gitManager.pull();
+            if (filesUpdated === undefined || filesUpdated === null) return;
+            if (filesUpdated.length === 0) {
+                this.displayMessage(
+                    `[${repo.displayName}] Pull: Everything is up-to-date`
+                );
+            }
+            this.app.workspace.trigger("obsidian-git:refresh", repo.id);
+        } catch (e) {
+            this.displayError(e);
+        }
+    }
+
+    async pushRepo(repo: GitRepo): Promise<void> {
+        if (!repo.ready) return;
+        try {
+            const result = await repo.gitManager.push();
+            if (typeof result === "number") {
+                this.displayMessage(
+                    `[${repo.displayName}] Pushed ${result} files.`
+                );
+            }
+            this.app.workspace.trigger("obsidian-git:refresh", repo.id);
+        } catch (e) {
+            this.displayError(e);
+        }
+    }
+
+    async fetchRepo(repo: GitRepo): Promise<void> {
+        if (!repo.ready) return;
+        try {
+            await repo.gitManager.fetch();
+            this.displayMessage(`[${repo.displayName}] Fetched from remote`);
+            this.app.workspace.trigger("obsidian-git:refresh", repo.id);
+        } catch (e) {
+            this.displayError(e);
+        }
+    }
+
+    /**
+     * Per-repo commit. Mirrors the legacy `commit()` method but targets the given repo.
+     * Reads per-repo settings from `repo.settings`.
+     */
+    async commitRepo(
+        repo: GitRepo,
+        {
+            fromAuto,
+            requestCustomMessage = false,
+            onlyStaged = false,
+            commitMessage,
+            amend = false,
+        }: {
+            fromAuto: boolean;
+            requestCustomMessage?: boolean;
+            onlyStaged?: boolean;
+            commitMessage?: string;
+            amend?: boolean;
+        }
+    ): Promise<boolean> {
+        // Active-repo override: temporarily target the requested repo so the legacy
+        // implementation (which reads `this.gitManager` etc.) operates on it.
+        const previous = this.localStorage.getActiveRepoOverride();
+        this.localStorage.setActiveRepoOverride(repo.id);
+        try {
+            return await this.commit({
+                fromAuto,
+                requestCustomMessage,
+                onlyStaged,
+                commitMessage,
+                amend,
+            });
+        } finally {
+            this.localStorage.setActiveRepoOverride(previous);
+        }
+    }
+
+    async commitAndSyncRepo(
+        repo: GitRepo,
+        opts: {
+            fromAutoBackup: boolean;
+            requestCustomMessage?: boolean;
+            commitMessage?: string;
+            onlyStaged?: boolean;
+        }
+    ): Promise<void> {
+        const previous = this.localStorage.getActiveRepoOverride();
+        this.localStorage.setActiveRepoOverride(repo.id);
+        try {
+            await this.commitAndSync(opts);
+        } finally {
+            this.localStorage.setActiveRepoOverride(previous);
+        }
+    }
+
+    /** True if any open Source Control or History view shows `repo`. */
+    private hasOpenViewForRepo(_repo: GitRepo): boolean {
         const gitViews = this.app.workspace.getLeavesOfType(
             SOURCE_CONTROL_VIEW_CONFIG.type
         );
         const historyViews = this.app.workspace.getLeavesOfType(
             HISTORY_VIEW_CONFIG.type
         );
-
-        if (
-            this.settings.changedFilesInStatusBar ||
+        return (
             gitViews.some((leaf) => !(leaf.isDeferred ?? false)) ||
             historyViews.some((leaf) => !(leaf.isDeferred ?? false))
-        ) {
-            await this.updateCachedStatus().catch((e) => this.displayError(e));
-        }
+        );
+    }
 
-        this.app.workspace.trigger("obsidian-git:refreshed");
+    async updateCachedStatus(): Promise<Status> {
+        const repo = this.activeRepo();
+        if (!repo) {
+            throw new Error("No active repository.");
+        }
+        const status = await repo.updateCachedStatus();
+        if (status.conflicted.length > 0) {
+            this.localStorage.setConflict(true);
+        } else {
+            this.localStorage.setConflict(false);
+        }
+        await this.branchBar?.display();
+        return status;
+    }
+
+    async refresh(repoId?: string) {
+        if (!this.gitReady) return;
+        const repos = repoId
+            ? ([this.repos.get(repoId)].filter(Boolean) as GitRepo[])
+            : Array.from(this.repos.values());
+        for (const repo of repos) {
+            if (
+                this.settings.changedFilesInStatusBar ||
+                this.hasOpenViewForRepo(repo)
+            ) {
+                await repo
+                    .updateCachedStatus()
+                    .catch((e) => this.displayError(e));
+            }
+        }
+        this.app.workspace.trigger("obsidian-git:refreshed", repoId);
 
         // We don't put a line authoring refresh here, as it would force a re-loading
         // of the line authoring feature - which would lead to a jumpy editor-view in the
@@ -247,30 +536,45 @@ export default class ObsidianGit extends Plugin {
         this.registerEvent(
             this.app.workspace.on("active-leaf-change", (leaf) => {
                 this.onActiveLeafChange(leaf);
+                // Auto-clear repo override if user opened a file in a different repo.
+                const override = this.localStorage.getActiveRepoOverride();
+                if (override) {
+                    const file = this.app.workspace.getActiveFile();
+                    if (file) {
+                        const repo = this.repoForFile(file);
+                        if (repo && repo.id !== override) {
+                            this.localStorage.setActiveRepoOverride(null);
+                            this.mirrorLegacySettingsFields();
+                            this.statusBar?.display();
+                            void this.branchBar?.display();
+                        }
+                    }
+                }
+            })
+        );
+        const routeVaultEvent = (filePath: string) => {
+            const repo = this.repoForVaultPath(filePath);
+            if (repo) {
+                repo.fileEventDebouncer?.();
+                repo.automatics.autoCommitDebouncer?.();
+            }
+        };
+
+        this.registerEvent(
+            this.app.vault.on("modify", (file) => routeVaultEvent(file.path))
+        );
+        this.registerEvent(
+            this.app.vault.on("delete", (file) => routeVaultEvent(file.path))
+        );
+        this.registerEvent(
+            this.app.vault.on("create", (file) => {
+                routeVaultEvent(file.path);
             })
         );
         this.registerEvent(
-            this.app.vault.on("modify", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
-            })
-        );
-        this.registerEvent(
-            this.app.vault.on("delete", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
-            })
-        );
-        this.registerEvent(
-            this.app.vault.on("create", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
-            })
-        );
-        this.registerEvent(
-            this.app.vault.on("rename", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
+            this.app.vault.on("rename", (file, oldPath) => {
+                routeVaultEvent(file.path);
+                routeVaultEvent(oldPath);
             })
         );
 
@@ -318,42 +622,38 @@ export default class ObsidianGit extends Plugin {
 
         this.editorIntegration.onLoadPlugin();
 
-        this.setRefreshDebouncer();
-
         addCommmands(this);
     }
 
+    /**
+     * @deprecated Per-repo debouncers are now created in `registerRepo`.
+     */
     setRefreshDebouncer(): void {
-        this.debRefresh?.cancel();
-        this.debRefresh = debounce(
-            () => {
-                if (this.settings.refreshSourceControl) {
-                    this.refresh().catch(console.error);
-                }
-            },
-            this.settings.refreshSourceControlTimer,
-            true
-        );
+        // No-op: replaced by per-repo `setRepoDebouncer`.
     }
 
     async addFileToGitignore(
         filePath: string,
         isFolder?: boolean
     ): Promise<void> {
-        const gitRelativePath = this.gitManager.getRelativeRepoPath(
+        const repo = this.repoForVaultPath(filePath);
+        if (!repo) {
+            this.displayError(`No repository contains "${filePath}".`);
+            return;
+        }
+        const gitRelativePath = repo.gitManager.getRelativeRepoPath(
             filePath,
             true
         );
-        // Define an absolute rule that can apply only for this item.
         const gitignoreRule = convertPathToAbsoluteGitignoreRule({
             isFolder,
             gitRelativePath,
         });
         await this.app.vault.adapter.append(
-            this.gitManager.getRelativeVaultPath(".gitignore"),
+            repo.gitManager.getRelativeVaultPath(".gitignore"),
             "\n" + gitignoreRule
         );
-        this.app.workspace.trigger("obsidian-git:refresh");
+        this.app.workspace.trigger("obsidian-git:refresh", repo.id);
     }
 
     handleFileMenu(
@@ -472,47 +772,188 @@ export default class ObsidianGit extends Plugin {
     }
 
     async migrateSettings(): Promise<void> {
-        if (this.settings.mergeOnPull != undefined) {
-            this.settings.syncMethod = this.settings.mergeOnPull
-                ? "merge"
-                : "rebase";
-            this.settings.mergeOnPull = undefined;
-            await this.saveSettings();
+        const s = this.settings;
+
+        // Pre-existing legacy migrations (kept from v1.x)
+        if (s.mergeOnPull != undefined) {
+            const target: SyncMethod = s.mergeOnPull ? "merge" : "rebase";
+            // Stage the value into the legacy field so the multi-repo migration below picks it up.
+            s.syncMethod = target;
+            s.mergeOnPull = undefined;
         }
-        if (this.settings.autoCommitMessage === undefined) {
-            this.settings.autoCommitMessage = this.settings.commitMessage;
-            await this.saveSettings();
+        if (s.gitPath != undefined) {
+            this.localStorage.setGitPath(s.gitPath);
+            s.gitPath = undefined;
         }
-        if (this.settings.gitPath != undefined) {
-            this.localStorage.setGitPath(this.settings.gitPath);
-            this.settings.gitPath = undefined;
-            await this.saveSettings();
+        if (s.username != undefined) {
+            this.localStorage.setPassword(s.username);
+            s.username = undefined;
         }
-        if (this.settings.username != undefined) {
-            this.localStorage.setPassword(this.settings.username);
-            this.settings.username = undefined;
+
+        // Multi-repo v1 migration (one-shot)
+        if (!s._migratedToMultiRepoV1) {
+            const defaults = DEFAULT_SETTINGS.globalRepoDefaults;
+            const pick = <K extends keyof PerRepoSettings>(
+                key: K,
+                fallback: PerRepoSettings[K]
+            ): PerRepoSettings[K] => {
+                const v = (s as unknown as Record<string, unknown>)[key];
+                return v === undefined ? fallback : (v as PerRepoSettings[K]);
+            };
+
+            const legacyAutoCommitMessage =
+                s.autoCommitMessage ??
+                s.commitMessage ??
+                defaults.autoCommitMessage;
+
+            const migratedDefaults: PerRepoSettings = {
+                commitMessage: pick("commitMessage", defaults.commitMessage),
+                autoCommitMessage:
+                    legacyAutoCommitMessage ?? defaults.autoCommitMessage,
+                commitMessageScript: pick(
+                    "commitMessageScript",
+                    defaults.commitMessageScript
+                ),
+                commitDateFormat: pick(
+                    "commitDateFormat",
+                    defaults.commitDateFormat
+                ),
+                autoSaveInterval: pick(
+                    "autoSaveInterval",
+                    defaults.autoSaveInterval
+                ),
+                autoPushInterval: pick(
+                    "autoPushInterval",
+                    defaults.autoPushInterval
+                ),
+                autoPullInterval: pick(
+                    "autoPullInterval",
+                    defaults.autoPullInterval
+                ),
+                autoPullOnBoot: pick("autoPullOnBoot", defaults.autoPullOnBoot),
+                autoCommitOnlyStaged: pick(
+                    "autoCommitOnlyStaged",
+                    defaults.autoCommitOnlyStaged
+                ),
+                syncMethod: pick("syncMethod", defaults.syncMethod),
+                mergeStrategy: pick("mergeStrategy", defaults.mergeStrategy),
+                disablePush: pick("disablePush", defaults.disablePush),
+                pullBeforePush: pick("pullBeforePush", defaults.pullBeforePush),
+                differentIntervalCommitAndPush: pick(
+                    "differentIntervalCommitAndPush",
+                    defaults.differentIntervalCommitAndPush
+                ),
+                customMessageOnAutoBackup: pick(
+                    "customMessageOnAutoBackup",
+                    defaults.customMessageOnAutoBackup
+                ),
+                autoBackupAfterFileChange: pick(
+                    "autoBackupAfterFileChange",
+                    defaults.autoBackupAfterFileChange
+                ),
+                setLastSaveToLastCommit: pick(
+                    "setLastSaveToLastCommit",
+                    defaults.setLastSaveToLastCommit
+                ),
+                updateSubmodules: pick(
+                    "updateSubmodules",
+                    defaults.updateSubmodules
+                ),
+                submoduleRecurseCheckout: pick(
+                    "submoduleRecurseCheckout",
+                    defaults.submoduleRecurseCheckout
+                ),
+                listChangedFilesInMessageBody: pick(
+                    "listChangedFilesInMessageBody",
+                    defaults.listChangedFilesInMessageBody
+                ),
+            };
+
+            const legacyBasePath = normalizeRepoPath(s.basePath ?? "");
+            const legacyGitDir =
+                s.gitDir && s.gitDir.length > 0 ? s.gitDir : undefined;
+
+            const repoId = newRepoId();
+            const repo: RepoConfig = {
+                id: repoId,
+                displayName: defaultDisplayName(legacyBasePath),
+                path: legacyBasePath,
+                gitDir: legacyGitDir,
+                overrides: {},
+            };
+
+            s.repos = [repo];
+            s.defaultRepoId = repoId;
+            s.globalRepoDefaults = migratedDefaults;
+
+            // Mirror per-repo defaults onto the legacy top-level fields so
+            // existing consumer code (settings UI, commands) keeps working.
+            this.mirrorLegacySettingsFields();
+
+            s._migratedToMultiRepoV1 = true;
             await this.saveSettings();
+        } else {
+            // Re-mirror on every load to keep legacy fields aligned with the active repo.
+            this.mirrorLegacySettingsFields();
         }
+    }
+
+    /**
+     * Copy effective per-repo settings (active repo) onto the legacy top-level
+     * fields in `this.settings`. Keeps deprecated consumer code working.
+     */
+    mirrorLegacySettingsFields(): void {
+        const s = this.settings;
+        const repo = this.activeRepo();
+        const eff: PerRepoSettings = repo
+            ? repo.settings
+            : s.globalRepoDefaults;
+        s.basePath = repo?.config.path ?? s.basePath ?? "";
+        s.gitDir = repo?.config.gitDir ?? s.gitDir ?? "";
+        s.commitMessage = eff.commitMessage;
+        s.autoCommitMessage = eff.autoCommitMessage;
+        s.commitMessageScript = eff.commitMessageScript;
+        s.commitDateFormat = eff.commitDateFormat;
+        s.autoSaveInterval = eff.autoSaveInterval;
+        s.autoPushInterval = eff.autoPushInterval;
+        s.autoPullInterval = eff.autoPullInterval;
+        s.autoPullOnBoot = eff.autoPullOnBoot;
+        s.autoCommitOnlyStaged = eff.autoCommitOnlyStaged;
+        s.syncMethod = eff.syncMethod;
+        s.mergeStrategy = eff.mergeStrategy;
+        s.disablePush = eff.disablePush;
+        s.pullBeforePush = eff.pullBeforePush;
+        s.differentIntervalCommitAndPush = eff.differentIntervalCommitAndPush;
+        s.customMessageOnAutoBackup = eff.customMessageOnAutoBackup;
+        s.autoBackupAfterFileChange = eff.autoBackupAfterFileChange;
+        s.setLastSaveToLastCommit = eff.setLastSaveToLastCommit;
+        s.updateSubmodules = eff.updateSubmodules;
+        s.submoduleRecurseCheckout = eff.submoduleRecurseCheckout;
+        s.listChangedFilesInMessageBody = eff.listChangedFilesInMessageBody;
     }
 
     unloadPlugin() {
         this.gitReady = false;
 
         this.editorIntegration.onUnloadPlugin();
-        this.automaticsManager.unload();
+        for (const repo of this.repos.values()) {
+            repo.unload();
+        }
+        this.repos.clear();
+        this.repoOrder = [];
+        for (const d of this.repoDebouncers.values()) d.cancel();
+        this.repoDebouncers.clear();
+        this._fallbackQueue.clear();
+
         this.branchBar?.remove();
         this.statusBar?.remove();
         this.statusBar = undefined;
         this.branchBar = undefined;
-        this.gitManager.unload();
-        this.promiseQueue.clear();
 
         for (const interval of this.intervalsToClear) {
             window.clearInterval(interval);
         }
         this.intervalsToClear = [];
-
-        this.debRefresh.cancel();
     }
 
     onunload() {
@@ -533,7 +974,48 @@ export default class ObsidianGit extends Plugin {
 
     async saveSettings() {
         this.settingsTab?.beforeSaveSettings();
+        // Propagate legacy top-level field writes (made by the old settings UI)
+        // back into `globalRepoDefaults` so per-repo aggregates see the change.
+        this.syncLegacyFieldsToGlobalDefaults();
         await this.saveData(this.settings);
+    }
+
+    /**
+     * Copy legacy top-level per-repo fields back into `globalRepoDefaults`.
+     * Called inside `saveSettings()` so UI edits to legacy fields take effect.
+     */
+    syncLegacyFieldsToGlobalDefaults(): void {
+        const s = this.settings;
+        const g = s.globalRepoDefaults;
+        if (!g) return;
+        g.commitMessage = s.commitMessage ?? g.commitMessage;
+        g.autoCommitMessage = s.autoCommitMessage ?? g.autoCommitMessage;
+        g.commitMessageScript = s.commitMessageScript ?? g.commitMessageScript;
+        g.commitDateFormat = s.commitDateFormat ?? g.commitDateFormat;
+        g.autoSaveInterval = s.autoSaveInterval ?? g.autoSaveInterval;
+        g.autoPushInterval = s.autoPushInterval ?? g.autoPushInterval;
+        g.autoPullInterval = s.autoPullInterval ?? g.autoPullInterval;
+        g.autoPullOnBoot = s.autoPullOnBoot ?? g.autoPullOnBoot;
+        g.autoCommitOnlyStaged =
+            s.autoCommitOnlyStaged ?? g.autoCommitOnlyStaged;
+        g.syncMethod = s.syncMethod ?? g.syncMethod;
+        g.mergeStrategy = s.mergeStrategy ?? g.mergeStrategy;
+        g.disablePush = s.disablePush ?? g.disablePush;
+        g.pullBeforePush = s.pullBeforePush ?? g.pullBeforePush;
+        g.differentIntervalCommitAndPush =
+            s.differentIntervalCommitAndPush ??
+            g.differentIntervalCommitAndPush;
+        g.customMessageOnAutoBackup =
+            s.customMessageOnAutoBackup ?? g.customMessageOnAutoBackup;
+        g.autoBackupAfterFileChange =
+            s.autoBackupAfterFileChange ?? g.autoBackupAfterFileChange;
+        g.setLastSaveToLastCommit =
+            s.setLastSaveToLastCommit ?? g.setLastSaveToLastCommit;
+        g.updateSubmodules = s.updateSubmodules ?? g.updateSubmodules;
+        g.submoduleRecurseCheckout =
+            s.submoduleRecurseCheckout ?? g.submoduleRecurseCheckout;
+        g.listChangedFilesInMessageBody =
+            s.listChangedFilesInMessageBody ?? g.listChangedFilesInMessageBody;
     }
 
     get useSimpleGit(): boolean {
@@ -550,84 +1032,99 @@ export default class ObsidianGit extends Plugin {
         }
 
         try {
-            if (this.useSimpleGit) {
-                this.gitManager = new SimpleGit(this);
-                await (this.gitManager as SimpleGit).setGitInstance();
-            } else {
-                this.gitManager = new IsomorphicGit(this);
+            // On mobile, only the first repo is active (Section 11 of spec).
+            const configs = Platform.isDesktopApp
+                ? this.settings.repos
+                : this.settings.repos.slice(0, 1);
+
+            this.repos.clear();
+            this.repoOrder = [];
+
+            if (configs.length === 0) {
+                new Notice(
+                    "No git repositories configured. Add one in the plugin settings, or run 'Initialize a new repo'.",
+                    10000
+                );
+                this.gitReady = false;
+                return;
             }
 
-            const result = await this.gitManager.checkRequirements();
-            const pausedAutomatics = this.localStorage.getPausedAutomatics();
-            switch (result) {
-                case "missing-git":
-                    this.displayError(
-                        `Cannot run git command. Trying to run: '${this.localStorage.getGitPath() || "git"}' .`
-                    );
-                    break;
-                case "missing-repo":
-                    new Notice(
-                        "Can't find a valid git repository. Please create one via the given command or clone an existing repo.",
-                        10000
-                    );
-                    break;
-                case "valid":
-                    this.gitReady = true;
-                    this.setPluginState({ gitAction: CurrentGitAction.idle });
+            for (const config of configs) {
+                await this.registerRepo(config);
+            }
 
-                    if (
-                        Platform.isDesktop &&
-                        this.settings.showBranchStatusBar &&
-                        !this.branchBar
-                    ) {
-                        const branchStatusBarEl = this.addStatusBarItem();
-                        this.branchBar = new BranchStatusBar(
-                            branchStatusBarEl,
-                            this
-                        );
-                        this.intervalsToClear.push(
-                            window.setInterval(
-                                () =>
-                                    void this.branchBar
-                                        ?.display()
-                                        .catch(console.error),
-                                60000
+            const anyReady = Array.from(this.repos.values()).some(
+                (r) => r.ready
+            );
+            this.gitReady = anyReady;
+
+            if (anyReady) {
+                this.setPluginState({ gitAction: CurrentGitAction.idle });
+
+                if (
+                    Platform.isDesktop &&
+                    this.settings.showBranchStatusBar &&
+                    !this.branchBar
+                ) {
+                    const branchStatusBarEl = this.addStatusBarItem();
+                    this.branchBar = new BranchStatusBar(
+                        branchStatusBarEl,
+                        this
+                    );
+                    this.intervalsToClear.push(
+                        window.setInterval(
+                            () =>
+                                void this.branchBar
+                                    ?.display()
+                                    .catch(console.error),
+                            60000
+                        )
+                    );
+                }
+                await this.branchBar?.display();
+
+                this.editorIntegration.onReady();
+
+                this.app.workspace.trigger("obsidian-git:refresh");
+                this.app.workspace.trigger("obsidian-git:head-change");
+
+                const pausedGlobal = this.localStorage.getPausedAutomatics();
+                if (!fromReload && !pausedGlobal) {
+                    // Per-repo autoPullOnBoot
+                    for (const repo of this.repos.values()) {
+                        if (
+                            repo.ready &&
+                            repo.settings.autoPullOnBoot &&
+                            !this.localStorage.isAutomaticsPausedForRepo(
+                                repo.id
                             )
-                        );
+                        ) {
+                            repo.promiseQueue.addTask(() =>
+                                this.pullRepoFromRemote(repo)
+                            );
+                        }
                     }
-                    await this.branchBar?.display();
+                }
 
-                    this.editorIntegration.onReady();
-
-                    this.app.workspace.trigger("obsidian-git:refresh");
-                    /// Among other things, this notifies the history view that git is ready
-                    this.app.workspace.trigger("obsidian-git:head-change");
-
-                    if (
-                        !fromReload &&
-                        this.settings.autoPullOnBoot &&
-                        !pausedAutomatics
-                    ) {
-                        this.promiseQueue.addTask(() =>
-                            this.pullChangesFromRemote()
-                        );
-                    }
-
-                    if (!pausedAutomatics) {
-                        await this.automaticsManager.init();
-                    }
-
-                    if (pausedAutomatics) {
-                        new Notice("Automatic routines are currently paused.");
-                    }
-
-                    break;
-                default:
-                    this.log(
-                        "Something weird happened. The 'checkRequirements' result is " +
-                            /* eslint-disable-next-line @typescript-eslint/restrict-plus-operands */
-                            result
+                if (pausedGlobal) {
+                    new Notice(
+                        "Automatic routines are currently paused (all repos)."
                     );
+                }
+
+                // Background scan for externally-inited repos.
+                window.setTimeout(() => {
+                    void this.scanVaultForGitRepos().then((paths) => {
+                        for (const p of paths) {
+                            new Notice(
+                                `Found unregistered git repo at "${
+                                    p || "<root>"
+                                }". Use Settings → Repositories → "Scan vault for repos" to add it.`,
+                                10000
+                            );
+                        }
+                    });
+                }, 0);
             }
         } catch (error) {
             this.displayError(error);
@@ -745,6 +1242,262 @@ export default class ObsidianGit extends Plugin {
                 await this.saveSettings();
             }
         }
+    }
+
+    /**
+     * Prompt for a path and initialize a new repo there.
+     */
+    async promptInitRepo(): Promise<void> {
+        const modal = new GeneralModal(this, {
+            placeholder:
+                "Enter vault-relative path for the new repo (blank = vault root)",
+            allowEmpty: true,
+        });
+        const raw = await modal.openAndGetResult();
+        if (raw === undefined) return;
+        const repoPath = normalizeRepoPath(raw);
+        if (
+            this.settings.repos.some((r) =>
+                repoPathsOverlap(r.path, repoPath)
+            )
+        ) {
+            this.displayError(
+                `Path "${repoPath || "<root>"}" overlaps an existing registered repo.`
+            );
+            return;
+        }
+        const adapter = this.app.vault.adapter;
+        if (repoPath !== "" && !(await adapter.exists(repoPath))) {
+            await adapter.mkdir(repoPath);
+        }
+        const config: RepoConfig = {
+            id: newRepoId(),
+            path: repoPath,
+            displayName: defaultDisplayName(repoPath),
+            overrides: {},
+        };
+        const tempRepo = new GitRepo(this, config);
+        try {
+            await tempRepo.gitManager.init();
+        } catch (e) {
+            this.displayError(e);
+            return;
+        }
+        this.settings.repos.push(config);
+        if (this.settings.defaultRepoId === null) {
+            this.settings.defaultRepoId = config.id;
+        }
+        await this.saveSettings();
+        await this.registerRepo(config);
+        this.gitReady = Array.from(this.repos.values()).some((r) => r.ready);
+        this.mirrorLegacySettingsFields();
+        new Notice(`Initialized new repo "${config.displayName}".`);
+        this.app.workspace.trigger("obsidian-git:refresh");
+    }
+
+    /**
+     * Prompt for URL/directory and clone a new repo.
+     */
+    async promptCloneRepo(): Promise<void> {
+        const urlModal = new GeneralModal(this, {
+            placeholder: "Enter remote URL",
+        });
+        const url = await urlModal.openAndGetResult();
+        if (!url) return;
+
+        const dirModal = new GeneralModal(this, {
+            placeholder:
+                "Enter vault-relative path for the clone (blank = vault root).",
+            allowEmpty: true,
+        });
+        const dirRaw = await dirModal.openAndGetResult();
+        if (dirRaw === undefined) return;
+        const dir = normalizeRepoPath(dirRaw);
+        if (this.settings.repos.some((r) => repoPathsOverlap(r.path, dir))) {
+            this.displayError(
+                `Path "${dir || "<root>"}" overlaps an existing registered repo.`
+            );
+            return;
+        }
+        const depthModal = new GeneralModal(this, {
+            placeholder: "Clone depth (blank for full).",
+            allowEmpty: true,
+        });
+        const depthRaw = await depthModal.openAndGetResult();
+        if (depthRaw === undefined) return;
+        let depth: number | undefined;
+        if (depthRaw !== "") {
+            depth = parseInt(depthRaw);
+            if (isNaN(depth)) {
+                this.displayError("Invalid depth.");
+                return;
+            }
+        }
+        const config: RepoConfig = {
+            id: newRepoId(),
+            path: dir,
+            displayName: defaultDisplayName(dir),
+            overrides: {},
+        };
+        const tempRepo = new GitRepo(this, config);
+        try {
+            await tempRepo.gitManager.clone(
+                formatRemoteUrl(url),
+                dir || ".",
+                depth
+            );
+        } catch (e) {
+            this.displayError(e);
+            return;
+        }
+        this.settings.repos.push(config);
+        if (this.settings.defaultRepoId === null) {
+            this.settings.defaultRepoId = config.id;
+        }
+        await this.saveSettings();
+        await this.registerRepo(config);
+        this.gitReady = Array.from(this.repos.values()).some((r) => r.ready);
+        this.mirrorLegacySettingsFields();
+        new Notice(`Cloned new repo "${config.displayName}".`);
+        this.app.workspace.trigger("obsidian-git:refresh");
+    }
+
+    /**
+     * Walk the vault depth-first looking for `.git` directories.
+     * Skips `.obsidian`, working trees of already-registered repos, and
+     * paths in `localStorage.getIgnoredRepoPaths()`.
+     *
+     * Returns a list of vault-relative repo paths (parent of each found `.git`).
+     */
+    async scanVaultForGitRepos(): Promise<string[]> {
+        const adapter = this.app.vault.adapter;
+        const found: string[] = [];
+        const ignored = new Set(this.localStorage.getIgnoredRepoPaths());
+        const registeredPaths = new Set(
+            this.settings.repos.map((r) => r.path)
+        );
+
+        const walk = async (dir: string) => {
+            let list: { folders: string[] };
+            try {
+                list = await adapter.list(dir || "/");
+            } catch {
+                return;
+            }
+            for (const sub of list.folders) {
+                const rel = sub;
+                const lastSeg = rel.split("/").pop();
+                if (lastSeg === ".obsidian") continue;
+                const skip = Array.from(registeredPaths).some(
+                    (rp) =>
+                        rp !== "" &&
+                        (rel === rp || rel.startsWith(rp + "/"))
+                );
+                if (skip) continue;
+                const gitPath = rel + "/.git";
+                if (await adapter.exists(gitPath)) {
+                    const candidate = rel;
+                    if (
+                        !ignored.has(candidate) &&
+                        !registeredPaths.has(candidate)
+                    ) {
+                        found.push(candidate);
+                    }
+                    continue;
+                }
+                await walk(rel);
+            }
+        };
+
+        if (await adapter.exists(".git")) {
+            if (!ignored.has("") && !registeredPaths.has("")) {
+                found.push("");
+            }
+        } else {
+            await walk("");
+        }
+        return found;
+    }
+
+    /** Register a repo at the given detected path. */
+    addRepoFromDetectedPath = async (path: string): Promise<void> => {
+        if (this.settings.repos.some((r) => repoPathsOverlap(r.path, path))) {
+            this.displayError(
+                `Path "${path || "<root>"}" overlaps an existing registered repo.`
+            );
+            return;
+        }
+        const config: RepoConfig = {
+            id: newRepoId(),
+            path,
+            displayName: defaultDisplayName(path),
+            overrides: {},
+        };
+        this.settings.repos.push(config);
+        if (this.settings.defaultRepoId === null) {
+            this.settings.defaultRepoId = config.id;
+        }
+        await this.saveSettings();
+        await this.registerRepo(config);
+        this.gitReady = Array.from(this.repos.values()).some((r) => r.ready);
+        this.mirrorLegacySettingsFields();
+        this.app.workspace.trigger("obsidian-git:refresh");
+        new Notice(`Added "${config.displayName}".`);
+    };
+
+    /**
+     * Pick a repo, confirm, then delete its `.git` directory and deregister.
+     */
+    async promptDeleteRepo(): Promise<void> {
+        if (this.repos.size === 0) {
+            new Notice("No repos to delete.");
+            return;
+        }
+        const ordered = this.repoOrder
+            .map((id) => this.repos.get(id))
+            .filter((r): r is GitRepo => !!r);
+        const picker = new GeneralModal(this, {
+            options: ordered.map(
+                (r) => `${r.displayName}  (${r.config.path || "<root>"})`
+            ),
+            placeholder: "Pick the repository to delete",
+            onlySelection: true,
+        });
+        const picked = await picker.openAndGetResult();
+        if (!picked) return;
+        const repo = ordered.find(
+            (r) => `${r.displayName}  (${r.config.path || "<root>"})` === picked
+        );
+        if (!repo) return;
+        const confirmText = `DELETE .git of "${repo.displayName}"`;
+        const confirm = new GeneralModal(this, {
+            options: ["Abort", confirmText],
+            placeholder: "This deletes the .git directory on disk. Proceed?",
+            onlySelection: true,
+        });
+        const decision = await confirm.openAndGetResult();
+        if (decision !== confirmText) {
+            new Notice("Aborted.");
+            return;
+        }
+        const gitDir =
+            repo.config.gitDir ||
+            (repo.config.path ? repo.config.path + "/" : "") + ".git";
+        this.unregisterRepo(repo.id);
+        this.settings.repos = this.settings.repos.filter(
+            (c) => c.id !== repo.id
+        );
+        await this.saveSettings();
+        try {
+            await this.app.vault.adapter.rmdir(gitDir, true);
+        } catch (e) {
+            console.error(e);
+        }
+        new Notice(
+            `Deleted "${repo.displayName}" from plugin and removed .git on disk.`
+        );
+        this.gitReady = Array.from(this.repos.values()).some((r) => r.ready);
+        this.app.workspace.trigger("obsidian-git:refresh");
     }
 
     /**
@@ -1194,23 +1947,25 @@ export default class ObsidianGit extends Plugin {
         }
     }
 
-    async stageFile(file: TFile): Promise<boolean> {
-        if (!(await this.isAllInitialized())) return false;
+    async stageFile(file: TFile, repo?: GitRepo): Promise<boolean> {
+        const target = repo ?? this.repoForFile(file);
+        if (!target || !target.ready) return false;
 
-        await this.gitManager.stage(file.path, true);
+        await target.gitManager.stage(file.path, true);
 
-        this.app.workspace.trigger("obsidian-git:refresh");
+        this.app.workspace.trigger("obsidian-git:refresh", target.id);
 
         this.setPluginState({ gitAction: CurrentGitAction.idle });
         return true;
     }
 
-    async unstageFile(file: TFile): Promise<boolean> {
-        if (!(await this.isAllInitialized())) return false;
+    async unstageFile(file: TFile, repo?: GitRepo): Promise<boolean> {
+        const target = repo ?? this.repoForFile(file);
+        if (!target || !target.ready) return false;
 
-        await this.gitManager.unstage(file.path, true);
+        await target.gitManager.unstage(file.path, true);
 
-        this.app.workspace.trigger("obsidian-git:refresh");
+        this.app.workspace.trigger("obsidian-git:refresh", target.id);
 
         this.setPluginState({ gitAction: CurrentGitAction.idle });
         return true;

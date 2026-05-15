@@ -1,6 +1,7 @@
 import type { Extension } from "@codemirror/state";
 import type { TFile } from "obsidian";
 import { eventsPerFilePathSingleton } from "src/editor/eventsPerFilepath";
+import { SimpleGit } from "src/gitManager/simpleGit";
 import type ObsidianGit from "src/main";
 import {
     computeHunksDebouncerStateField,
@@ -42,17 +43,13 @@ export class SignsProvider {
     public destroy() {}
 
     private async computeSigns(filepath: string) {
-        const gitManager =
-            this.plugin.editorIntegration.lineAuthoringFeature.isAvailableOnCurrentPlatform()
-                .gitManager;
-
-        // const headRevision =
-        //     await gitManager.submoduleAwareHeadRevisonInContainingDirectory(
-        //         filepath
-        //     );
+        const repo = this.plugin.repoForVaultPath(filepath);
+        if (!repo || !(repo.gitManager instanceof SimpleGit)) return;
+        const gitManager = repo.gitManager;
+        const repoRelative = gitManager.getRelativeRepoPath(filepath, true);
 
         const compareText = await gitManager
-            .show("", filepath)
+            .show("", repoRelative)
             .catch(() => undefined);
         // const compareTextHead = await gitManager
         //     .show(headRevision, filepath)

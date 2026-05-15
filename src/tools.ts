@@ -4,6 +4,7 @@ import {
     DIFF_VIEW_CONFIG,
     SPLIT_DIFF_VIEW_CONFIG,
 } from "./constants";
+import type { GitRepo } from "./gitRepo";
 import type ObsidianGit from "./main";
 import { SimpleGit } from "./gitManager/simpleGit";
 import { getNewLeaf, splitRemoteBranch } from "./utils";
@@ -14,22 +15,25 @@ export default class Tools {
     constructor(private readonly plugin: ObsidianGit) {}
 
     async hasTooBigFiles(
-        files: { vaultPath: string; path: string }[]
+        files: { vaultPath: string; path: string }[],
+        repo?: GitRepo
     ): Promise<boolean> {
-        const branchInfo = await this.plugin.gitManager.branchInfo();
+        const target = repo ?? this.plugin.activeRepo();
+        if (!target) return false;
+        const gitManager = target.gitManager;
+        const branchInfo = await gitManager.branchInfo();
         const remote = branchInfo.tracking
             ? splitRemoteBranch(branchInfo.tracking)[0]
             : null;
 
         if (!remote) return false;
 
-        const remoteUrl = await this.plugin.gitManager.getRemoteUrl(remote);
+        const remoteUrl = await gitManager.getRemoteUrl(remote);
 
         //Check for files >100mb on GitHub remote
         if (remoteUrl?.includes("github.com")) {
             const tooBigFiles = [];
 
-            const gitManager = this.plugin.gitManager;
             for (const f of files) {
                 const file = this.plugin.app.vault.getAbstractFileByPath(
                     f.vaultPath
@@ -100,25 +104,30 @@ export default class Tools {
         }
     }
 
-    openDiff({
-        aFile,
-        bFile,
-        aRef,
-        bRef,
-        event,
-    }: {
-        aFile: string;
-        bFile?: string;
-        aRef: string;
-        bRef?: string;
-        event?: MouseEvent;
-    }) {
+    openDiff(
+        {
+            aFile,
+            bFile,
+            aRef,
+            bRef,
+            event,
+        }: {
+            aFile: string;
+            bFile?: string;
+            aRef: string;
+            bRef?: string;
+            event?: MouseEvent;
+        },
+        repo?: GitRepo
+    ) {
+        const target = repo ?? this.plugin.activeRepo();
         let diffStyle = this.plugin.settings.diffStyle;
         if (Platform.isMobileApp) {
             diffStyle = "git_unified";
         }
 
         const state: DiffViewState = {
+            repoId: target?.id,
             aFile: aFile,
             bFile: bFile ?? aFile,
             aRef: aRef,
@@ -141,7 +150,9 @@ export default class Tools {
     }
 
     async runRawCommand() {
-        const gitManager = this.plugin.gitManager;
+        const repo = this.plugin.activeRepo();
+        if (!repo) return;
+        const gitManager = repo.gitManager;
         if (!(gitManager instanceof SimpleGit)) {
             return;
         }
@@ -152,7 +163,7 @@ export default class Tools {
         const command = await modal.openAndGetResult();
         if (command === undefined) return;
 
-        this.plugin.promiseQueue.addTask(async () => {
+        repo.promiseQueue.addTask(async () => {
             const notice = new Notice(`Running '${command}'...`, 999_999);
 
             try {

@@ -3,7 +3,7 @@ import { HunksStateHelper } from "./hunkState";
 import type { EditorView } from "codemirror";
 import type ObsidianGit from "src/main";
 import { Hunks } from "./hunks";
-import type { SimpleGit } from "src/gitManager/simpleGit";
+import { SimpleGit } from "src/gitManager/simpleGit";
 
 export class HunkActions {
     constructor(private readonly plugin: ObsidianGit) {}
@@ -19,8 +19,12 @@ export class HunkActions {
         return { editor, obEditor };
     }
 
-    private get gitManager(): SimpleGit {
-        return this.plugin.gitManager as SimpleGit;
+    private gitManagerForFile(filePath: string): SimpleGit | undefined {
+        const repo = this.plugin.repoForVaultPath(filePath);
+        if (!repo) return undefined;
+        return repo.gitManager instanceof SimpleGit
+            ? repo.gitManager
+            : undefined;
     }
 
     resetHunk(pos?: number): void {
@@ -76,14 +80,22 @@ export class HunkActions {
         if (!hunk) {
             return;
         }
-        const filepath = editor.state.field(editorInfoField).file!.path;
+        const file = editor.state.field(editorInfoField).file!;
+        const filepath = file.path;
 
+        const repo = this.plugin.repoForFile(file);
+        const gitManager = this.gitManagerForFile(filepath);
+        if (!repo || !gitManager) return;
+
+        // The patch uses the path relative to the repo's working tree.
+        const repoRelative = gitManager.getRelativeRepoPath(filepath, true);
         const patch =
-            Hunks.createPatch(filepath, [hunk], "100644", invert).join("\n") +
-            "\n";
-        await this.gitManager.applyPatch(patch);
+            Hunks.createPatch(repoRelative, [hunk], "100644", invert).join(
+                "\n"
+            ) + "\n";
+        await gitManager.applyPatch(patch);
 
-        this.plugin.app.workspace.trigger("obsidian-git:refresh");
+        this.plugin.app.workspace.trigger("obsidian-git:refresh", repo.id);
     }
 
     goToHunk(direction: "first" | "last" | "next" | "prev"): void {

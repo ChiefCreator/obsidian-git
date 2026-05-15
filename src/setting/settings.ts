@@ -30,6 +30,15 @@ import type {
     SyncMethod,
 } from "src/types";
 import { convertToRgb, formatMinutes, rgbToString } from "src/utils";
+import { ScanReposModal } from "src/ui/modals/scanReposModal";
+import { GeneralModal } from "src/ui/modals/generalModal";
+import {
+    defaultDisplayName,
+    newRepoId,
+    normalizeRepoPath,
+    repoPathsOverlap,
+} from "src/utils/repoPath";
+import type { RepoConfig } from "src/types";
 
 const FORMAT_STRING_REFERENCE_URL =
     "https://momentjs.com/docs/#/parsing/string-format/";
@@ -65,6 +74,10 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
         const gitReady = plugin.gitReady;
 
         containerEl.empty();
+
+        // Repositories section (new, multi-repo)
+        this.renderRepositoriesSection();
+
         if (!gitReady) {
             containerEl.createEl("p", {
                 text: "Git is not ready. When all settings are correct you can configure commit-sync, etc.",
@@ -89,7 +102,8 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                             plugin.settings.differentIntervalCommitAndPush =
                                 value;
                             await plugin.saveSettings();
-                            plugin.automaticsManager.reload("commit", "push");
+                            for (const r of plugin.repos.values())
+                                r.automatics.reload("commit", "push");
                             this.refreshDisplayWithDelay();
                         })
                 );
@@ -120,7 +134,8 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                                 DEFAULT_SETTINGS.autoSaveInterval;
                         }
                         await plugin.saveSettings();
-                        plugin.automaticsManager.reload("commit");
+                        for (const r of plugin.repos.values())
+                            r.automatics.reload("commit");
                     });
                 });
 
@@ -141,7 +156,8 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                             this.refreshDisplayWithDelay();
 
                             await plugin.saveSettings();
-                            plugin.automaticsManager.reload("commit");
+                            for (const r of plugin.repos.values())
+                                r.automatics.reload("commit");
                         })
                 );
             this.mayDisableSetting(
@@ -160,7 +176,8 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                         .onChange(async (value) => {
                             plugin.settings.setLastSaveToLastCommit = value;
                             await plugin.saveSettings();
-                            plugin.automaticsManager.reload("commit");
+                            for (const r of plugin.repos.values())
+                                r.automatics.reload("commit");
                             this.refreshDisplayWithDelay();
                         })
                 );
@@ -191,7 +208,8 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                                 DEFAULT_SETTINGS.autoPushInterval;
                         }
                         await plugin.saveSettings();
-                        plugin.automaticsManager.reload("push");
+                        for (const r of plugin.repos.values())
+                            r.automatics.reload("push");
                     });
                 });
             this.mayDisableSetting(
@@ -221,7 +239,8 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                                 DEFAULT_SETTINGS.autoPullInterval;
                         }
                         await plugin.saveSettings();
-                        plugin.automaticsManager.reload("pull");
+                        for (const r of plugin.repos.values())
+                            r.automatics.reload("pull");
                     });
                 });
 
@@ -1539,6 +1558,169 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
      */
     private refreshDisplayWithDelay(timeout = 80): void {
         window.setTimeout(() => this.display(), timeout);
+    }
+
+    /**
+     * Renders the per-repository management section: list of registered repos,
+     * add/scan controls, and the default-repo dropdown. The per-field commit and
+     * sync settings still live below in the existing sections and are written
+     * via the legacy-mirror shim to `globalRepoDefaults`.
+     */
+    private renderRepositoriesSection(): void {
+        const { containerEl } = this;
+        const plugin = this.plugin;
+
+        new Setting(containerEl).setName("Repositories").setHeading();
+
+        for (const config of plugin.settings.repos) {
+            const setting = new Setting(containerEl)
+                .setName(config.displayName)
+                .setDesc(
+                    `Path: ${config.path || "<vault root>"}${
+                        config.gitDir ? `  •  gitDir: ${config.gitDir}` : ""
+                    }`
+                );
+            setting.addButton((btn) =>
+                btn
+                    .setButtonText("Rename")
+                    .onClick(() => this.openRenameRepoModal(config))
+            );
+            setting.addExtraButton((btn) =>
+                btn
+                    .setIcon("trash")
+                    .setTooltip(
+                        "Remove from plugin (does not delete the .git directory)"
+                    )
+                    .onClick(() => this.confirmRemoveRepo(config))
+            );
+        }
+
+        new Setting(containerEl)
+            .addButton((btn) =>
+                btn
+                    .setButtonText("+ Add repository")
+                    .setCta()
+                    .onClick(() => this.openAddRepoFlow())
+            )
+            .addButton((btn) =>
+                btn
+                    .setButtonText("Scan vault for repos")
+                    .onClick(() => new ScanReposModal(plugin).open())
+            )
+            .addButton((btn) =>
+                btn
+                    .setButtonText("Initialize new repo here…")
+                    .onClick(() => {
+                        plugin
+                            .promptInitRepo()
+                            .then(() => this.display())
+                            .catch((e) => plugin.displayError(e));
+                    })
+            )
+            .addButton((btn) =>
+                btn
+                    .setButtonText("Clone remote repo…")
+                    .onClick(() => {
+                        plugin
+                            .promptCloneRepo()
+                            .then(() => this.display())
+                            .catch((e) => plugin.displayError(e));
+                    })
+            );
+
+        if (plugin.settings.repos.length > 0) {
+            new Setting(containerEl)
+                .setName("Default repository")
+                .setDesc(
+                    "Used when no file is open and no override is set."
+                )
+                .addDropdown((dd) => {
+                    dd.addOption("", "(none)");
+                    for (const c of plugin.settings.repos) {
+                        dd.addOption(c.id, c.displayName);
+                    }
+                    dd.setValue(plugin.settings.defaultRepoId ?? "").onChange(
+                        async (v) => {
+                            plugin.settings.defaultRepoId = v || null;
+                            await plugin.saveSettings();
+                            plugin.mirrorLegacySettingsFields();
+                        }
+                    );
+                });
+        }
+    }
+
+    private async openAddRepoFlow(): Promise<void> {
+        const plugin = this.plugin;
+        const modal = new GeneralModal(plugin, {
+            placeholder:
+                "Vault-relative path for the new repo entry (blank = vault root)",
+            allowEmpty: true,
+        });
+        const raw = await modal.openAndGetResult();
+        if (raw === undefined) return;
+        const path = normalizeRepoPath(raw);
+        if (
+            plugin.settings.repos.some((r) => repoPathsOverlap(r.path, path))
+        ) {
+            plugin.displayError(
+                `Path "${path || "<root>"}" overlaps an existing registered repo.`
+            );
+            return;
+        }
+        const config: RepoConfig = {
+            id: newRepoId(),
+            path,
+            displayName: defaultDisplayName(path),
+            overrides: {},
+        };
+        plugin.settings.repos.push(config);
+        if (plugin.settings.defaultRepoId === null) {
+            plugin.settings.defaultRepoId = config.id;
+        }
+        await plugin.saveSettings();
+        await plugin.registerRepo(config);
+        plugin.gitReady = Array.from(plugin.repos.values()).some(
+            (r) => r.ready
+        );
+        plugin.mirrorLegacySettingsFields();
+        this.display();
+    }
+
+    private async openRenameRepoModal(config: RepoConfig): Promise<void> {
+        const plugin = this.plugin;
+        const modal = new GeneralModal(plugin, {
+            placeholder: "New display name",
+            initialValue: config.displayName,
+            allowEmpty: false,
+        });
+        const name = await modal.openAndGetResult();
+        if (!name) return;
+        config.displayName = name;
+        await plugin.saveSettings();
+        this.display();
+    }
+
+    private async confirmRemoveRepo(config: RepoConfig): Promise<void> {
+        const plugin = this.plugin;
+        const modal = new GeneralModal(plugin, {
+            options: ["Abort", `Remove "${config.displayName}"`],
+            placeholder:
+                "Remove this repository from the plugin? The .git directory on disk is NOT touched.",
+            onlySelection: true,
+        });
+        const decision = await modal.openAndGetResult();
+        if (decision !== `Remove "${config.displayName}"`) return;
+        plugin.unregisterRepo(config.id);
+        plugin.settings.repos = plugin.settings.repos.filter(
+            (c) => c.id !== config.id
+        );
+        await plugin.saveSettings();
+        plugin.gitReady = Array.from(plugin.repos.values()).some(
+            (r) => r.ready
+        );
+        plugin.mirrorLegacySettingsFields();
+        this.display();
     }
 }
 

@@ -59,6 +59,13 @@ export class StatusBar {
         }
     }
 
+    /** Suffix shown next to the icon when more than one repo is registered. */
+    private repoSuffix(): string {
+        if (this.plugin.repos.size <= 1) return "";
+        const repo = this.plugin.activeRepo();
+        return repo ? ` (${repo.displayName})` : "";
+    }
+
     private displayState() {
         //Messages have to be removed before the state is set
         if (
@@ -145,19 +152,19 @@ export class StatusBar {
     private displayFromNow(): void {
         const timestamp = this.lastCommitTimestamp;
         const offlineMode = this.plugin.state.offlineMode;
+        const suffix = this.repoSuffix();
         if (timestamp) {
             const fromNow = moment(timestamp).fromNow();
             this.statusBarEl.ariaLabel = `${
                 offlineMode ? "Offline: " : ""
-            }Last Commit: ${fromNow}`;
+            }Last Commit: ${fromNow}${suffix}`;
 
             if ((this.unPushedCommits ?? 0) > 0) {
                 this.statusBarEl.ariaLabel += `\n(${this.unPushedCommits} unpushed commits)`;
             }
         } else {
-            this.statusBarEl.ariaLabel = offlineMode
-                ? "Git is offline"
-                : "Git is ready";
+            this.statusBarEl.ariaLabel =
+                (offlineMode ? "Git is offline" : "Git is ready") + suffix;
         }
 
         if (offlineMode) {
@@ -177,10 +184,14 @@ export class StatusBar {
     }
 
     private async refreshCommitTimestamp() {
-        this.lastCommitTimestamp =
-            await this.plugin.gitManager.getLastCommitTime();
-        this.unPushedCommits =
-            await this.plugin.gitManager.getUnpushedCommits();
+        const repo = this.plugin.activeRepo();
+        if (!repo || !repo.ready) {
+            this.lastCommitTimestamp = undefined;
+            this.unPushedCommits = undefined;
+            return;
+        }
+        this.lastCommitTimestamp = await repo.gitManager.getLastCommitTime();
+        this.unPushedCommits = await repo.gitManager.getUnpushedCommits();
     }
 
     public remove() {

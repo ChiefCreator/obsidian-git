@@ -6,6 +6,8 @@ import type {
     DiffFile,
     FileStatusResult,
     LogEntry,
+    PerRepoSettings,
+    RepoConfig,
     Status,
     TreeItem,
     UnstagedFile,
@@ -14,9 +16,20 @@ import type {
 export abstract class GitManager {
     readonly plugin: ObsidianGit;
     readonly app: App;
-    constructor(plugin: ObsidianGit) {
+    /** Per-repo config. Required from v2 onward. */
+    readonly repoConfig: RepoConfig;
+    constructor(plugin: ObsidianGit, repoConfig: RepoConfig) {
         this.plugin = plugin;
         this.app = plugin.app;
+        this.repoConfig = repoConfig;
+    }
+
+    /** Effective per-repo settings (global defaults merged with this repo's overrides). */
+    get effectiveSettings(): PerRepoSettings {
+        return {
+            ...this.plugin.settings.globalRepoDefaults,
+            ...this.repoConfig.overrides,
+        };
     }
 
     abstract status(opts?: { path?: string }): Promise<Status>;
@@ -135,8 +148,8 @@ export abstract class GitManager {
 
     // Constructs a path relative to the vault from a path relative to the git repository
     getRelativeVaultPath(path: string): string {
-        if (this.plugin.settings.basePath) {
-            return this.plugin.settings.basePath + "/" + path;
+        if (this.repoConfig.path) {
+            return this.repoConfig.path + "/" + path;
         } else {
             return path;
         }
@@ -150,11 +163,9 @@ export abstract class GitManager {
         doConversion: boolean = true
     ): string {
         if (doConversion) {
-            if (this.plugin.settings.basePath.length > 0) {
+            if (this.repoConfig.path.length > 0) {
                 //Expect the case that the git repository is located inside the vault on mobile platform currently.
-                return filePath.substring(
-                    this.plugin.settings.basePath.length + 1
-                );
+                return filePath.substring(this.repoConfig.path.length + 1);
             }
         }
         return filePath;
@@ -310,11 +321,12 @@ export abstract class GitManager {
             template = template.replace("{{files}}", files);
         }
 
+        const repoSettings = this.effectiveSettings;
         template = template.replace(
             "{{date}}",
-            moment().format(this.plugin.settings.commitDateFormat)
+            moment().format(repoSettings.commitDateFormat)
         );
-        if (this.plugin.settings.listChangedFilesInMessageBody) {
+        if (repoSettings.listChangedFilesInMessageBody) {
             const status2 = status ?? (await this.status());
             let files = "";
             // If there are more than 100 files, we don't list them all

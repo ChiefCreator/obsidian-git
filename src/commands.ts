@@ -1,13 +1,45 @@
-import { Notice, Platform, TFolder, WorkspaceLeaf } from "obsidian";
+import { Notice, Platform, TFile, TFolder, WorkspaceLeaf } from "obsidian";
 import { HISTORY_VIEW_CONFIG, SOURCE_CONTROL_VIEW_CONFIG } from "./constants";
 import { SimpleGit } from "./gitManager/simpleGit";
+import type { GitRepo } from "./gitRepo";
 import ObsidianGit from "./main";
 import { openHistoryInGitHub, openLineInGitHub } from "./openInGitHub";
 import { ChangedFilesModal } from "./ui/modals/changedFilesModal";
-import { GeneralModal } from "./ui/modals/generalModal";
+import { RepoSelectorModal } from "./ui/modals/repoSelectorModal";
 import { IgnoreModal } from "./ui/modals/ignoreModal";
 import { assertNever } from "./utils";
 import { togglePreviewHunk } from "./editor/signs/tooltip";
+
+function requireActiveRepo(plugin: ObsidianGit): GitRepo | undefined {
+    const repo = plugin.activeRepo();
+    if (!repo) {
+        new Notice(
+            "No active repository. Open a file in a configured repo, set a default repo in settings, or use 'Switch active repo'.",
+            8000
+        );
+        return undefined;
+    }
+    return repo;
+}
+
+function requireRepoForActiveFile(
+    plugin: ObsidianGit
+): { repo: GitRepo; file: TFile } | undefined {
+    const file = plugin.app.workspace.getActiveFile();
+    if (!file) {
+        new Notice("No active file.", 5000);
+        return undefined;
+    }
+    const repo = plugin.repoForFile(file);
+    if (!repo) {
+        new Notice(
+            `File "${file.path}" is not inside a registered repository.`,
+            6000
+        );
+        return undefined;
+    }
+    return { repo, file };
+}
 
 export function addCommmands(plugin: ObsidianGit) {
     const app = plugin.app;
@@ -16,7 +48,9 @@ export function addCommmands(plugin: ObsidianGit) {
         id: "edit-gitignore",
         name: "Edit .gitignore",
         callback: async () => {
-            const path = plugin.gitManager.getRelativeVaultPath(".gitignore");
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            const path = repo.gitManager.getRelativeVaultPath(".gitignore");
             if (!(await app.vault.adapter.exists(path))) {
                 await app.vault.adapter.write(path, "");
             }
@@ -25,7 +59,7 @@ export function addCommmands(plugin: ObsidianGit) {
             const res = await modal.openAndGetReslt();
             if (res !== undefined) {
                 await app.vault.adapter.write(path, res);
-                await plugin.refresh();
+                await plugin.refresh(repo.id);
             }
         },
     });
@@ -49,8 +83,6 @@ export function addCommmands(plugin: ObsidianGit) {
             }
             await app.workspace.revealLeaf(leaf);
 
-            // Is not needed for the first open, but allows to refresh the view
-            // per hotkey even if already opened
             app.workspace.trigger("obsidian-git:refresh");
         },
     });
@@ -74,8 +106,6 @@ export function addCommmands(plugin: ObsidianGit) {
             }
             await app.workspace.revealLeaf(leaf);
 
-            // Is not needed for the first open, but allows to refresh the view
-            // per hotkey even if already opened
             app.workspace.trigger("obsidian-git:refresh");
         },
     });
@@ -88,14 +118,19 @@ export function addCommmands(plugin: ObsidianGit) {
             if (checking) {
                 return file !== null;
             } else {
-                const filePath = plugin.gitManager.getRelativeRepoPath(
-                    file!.path,
+                const r = requireRepoForActiveFile(plugin);
+                if (!r) return;
+                const filePath = r.repo.gitManager.getRelativeRepoPath(
+                    r.file.path,
                     true
                 );
-                plugin.tools.openDiff({
-                    aFile: filePath,
-                    aRef: "",
-                });
+                plugin.tools.openDiff(
+                    {
+                        aFile: filePath,
+                        aRef: "",
+                    },
+                    r.repo
+                );
             }
         },
     });
@@ -104,7 +139,10 @@ export function addCommmands(plugin: ObsidianGit) {
         id: "view-file-on-github",
         name: "Open file on GitHub",
         editorCallback: (editor, { file }) => {
-            if (file) return openLineInGitHub(editor, file, plugin.gitManager);
+            if (!file) return;
+            const repo = plugin.repoForFile(file);
+            if (!repo) return;
+            return openLineInGitHub(editor, file, repo.gitManager);
         },
     });
 
@@ -112,28 +150,41 @@ export function addCommmands(plugin: ObsidianGit) {
         id: "view-history-on-github",
         name: "Open file history on GitHub",
         editorCallback: (_, { file }) => {
-            if (file) return openHistoryInGitHub(file, plugin.gitManager);
+            if (!file) return;
+            const repo = plugin.repoForFile(file);
+            if (!repo) return;
+            return openHistoryInGitHub(file, repo.gitManager);
         },
     });
 
     plugin.addCommand({
         id: "pull",
         name: "Pull",
-        callback: () =>
-            plugin.promiseQueue.addTask(() => plugin.pullChangesFromRemote()),
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() => plugin.pullRepoFromRemote(repo));
+        },
     });
 
     plugin.addCommand({
         id: "fetch",
         name: "Fetch",
-        callback: () => plugin.promiseQueue.addTask(() => plugin.fetch()),
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() => plugin.fetchRepo(repo));
+        },
     });
 
     plugin.addCommand({
         id: "switch-to-remote-branch",
         name: "Switch to remote branch",
-        callback: () =>
-            plugin.promiseQueue.addTask(() => plugin.switchRemoteBranch()),
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() => plugin.switchRemoteBranch());
+        },
     });
 
     plugin.addCommand({
@@ -154,81 +205,97 @@ export function addCommmands(plugin: ObsidianGit) {
     plugin.addCommand({
         id: "push",
         name: "Commit-and-sync",
-        callback: () =>
-            plugin.promiseQueue.addTask(() =>
-                plugin.commitAndSync({ fromAutoBackup: false })
-            ),
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() =>
+                plugin.commitAndSyncRepo(repo, { fromAutoBackup: false })
+            );
+        },
     });
 
     plugin.addCommand({
         id: "backup-and-close",
         name: "Commit-and-sync and then close Obsidian",
-        callback: () =>
-            plugin.promiseQueue.addTask(async () => {
-                await plugin.commitAndSync({ fromAutoBackup: false });
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(async () => {
+                await plugin.commitAndSyncRepo(repo, { fromAutoBackup: false });
                 window.close();
-            }),
+            });
+        },
     });
 
     plugin.addCommand({
         id: "commit-push-specified-message",
         name: "Commit-and-sync with specific message",
-        callback: () =>
-            plugin.promiseQueue.addTask(() =>
-                plugin.commitAndSync({
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() =>
+                plugin.commitAndSyncRepo(repo, {
                     fromAutoBackup: false,
                     requestCustomMessage: true,
                 })
-            ),
+            );
+        },
     });
 
     plugin.addCommand({
         id: "commit",
         name: "Commit all changes",
-        callback: () =>
-            plugin.promiseQueue.addTask(() =>
-                plugin.commit({ fromAuto: false })
-            ),
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() =>
+                plugin.commitRepo(repo, { fromAuto: false })
+            );
+        },
     });
 
     plugin.addCommand({
         id: "commit-specified-message",
         name: "Commit all changes with specific message",
-        callback: () =>
-            plugin.promiseQueue.addTask(() =>
-                plugin.commit({
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() =>
+                plugin.commitRepo(repo, {
                     fromAuto: false,
                     requestCustomMessage: true,
                 })
-            ),
+            );
+        },
     });
 
     plugin.addCommand({
         id: "commit-smart",
         name: "Commit",
-        callback: () =>
-            plugin.promiseQueue.addTask(async () => {
-                const status = await plugin.updateCachedStatus();
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(async () => {
+                const status = await repo.updateCachedStatus();
                 const onlyStaged = status.staged.length > 0;
-                return plugin.commit({
+                return plugin.commitRepo(repo, {
                     fromAuto: false,
                     requestCustomMessage: false,
                     onlyStaged: onlyStaged,
                 });
-            }),
+            });
+        },
     });
 
     plugin.addCommand({
         id: "commit-staged",
         name: "Commit staged",
         checkCallback: function (checking) {
-            // Don't show this command in command palette, because the
-            // commit-smart command is more useful. Still provide this command
-            // for hotkeys and automation.
             if (checking) return false;
-
-            plugin.promiseQueue.addTask(async () => {
-                return plugin.commit({
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(async () => {
+                return plugin.commitRepo(repo, {
                     fromAuto: false,
                     requestCustomMessage: false,
                 });
@@ -240,41 +307,48 @@ export function addCommmands(plugin: ObsidianGit) {
         plugin.addCommand({
             id: "commit-amend-staged-specified-message",
             name: "Amend staged",
-            callback: () =>
-                plugin.promiseQueue.addTask(() =>
-                    plugin.commit({
+            callback: () => {
+                const repo = requireActiveRepo(plugin);
+                if (!repo) return;
+                repo.promiseQueue.addTask(() =>
+                    plugin.commitRepo(repo, {
                         fromAuto: false,
                         requestCustomMessage: true,
                         onlyStaged: true,
                         amend: true,
                     })
-                ),
+                );
+            },
         });
     }
 
     plugin.addCommand({
         id: "commit-smart-specified-message",
         name: "Commit with specific message",
-        callback: () =>
-            plugin.promiseQueue.addTask(async () => {
-                const status = await plugin.updateCachedStatus();
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(async () => {
+                const status = await repo.updateCachedStatus();
                 const onlyStaged = status.staged.length > 0;
-                return plugin.commit({
+                return plugin.commitRepo(repo, {
                     fromAuto: false,
                     requestCustomMessage: true,
                     onlyStaged: onlyStaged,
                 });
-            }),
+            });
+        },
     });
 
     plugin.addCommand({
         id: "commit-staged-specified-message",
         name: "Commit staged with specific message",
         checkCallback: function (checking) {
-            // Same reason as for commit-staged
             if (checking) return false;
-            return plugin.promiseQueue.addTask(() =>
-                plugin.commit({
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            return repo.promiseQueue.addTask(() =>
+                plugin.commitRepo(repo, {
                     fromAuto: false,
                     requestCustomMessage: true,
                     onlyStaged: true,
@@ -286,7 +360,11 @@ export function addCommmands(plugin: ObsidianGit) {
     plugin.addCommand({
         id: "push2",
         name: "Push",
-        callback: () => plugin.promiseQueue.addTask(() => plugin.push()),
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            repo.promiseQueue.addTask(() => plugin.pushRepo(repo));
+        },
     });
 
     plugin.addCommand({
@@ -297,7 +375,11 @@ export function addCommmands(plugin: ObsidianGit) {
             if (checking) {
                 return file !== null;
             } else {
-                plugin.promiseQueue.addTask(() => plugin.stageFile(file!));
+                const r = requireRepoForActiveFile(plugin);
+                if (!r) return;
+                r.repo.promiseQueue.addTask(() =>
+                    plugin.stageFile(r.file, r.repo)
+                );
             }
         },
     });
@@ -310,7 +392,11 @@ export function addCommmands(plugin: ObsidianGit) {
             if (checking) {
                 return file !== null;
             } else {
-                plugin.promiseQueue.addTask(() => plugin.unstageFile(file!));
+                const r = requireRepoForActiveFile(plugin);
+                if (!r) return;
+                r.repo.promiseQueue.addTask(() =>
+                    plugin.unstageFile(r.file, r.repo)
+                );
             }
         },
     });
@@ -339,57 +425,37 @@ export function addCommmands(plugin: ObsidianGit) {
     plugin.addCommand({
         id: "delete-repo",
         name: "CAUTION: Delete repository",
-        callback: async () => {
-            const repoExists = await app.vault.adapter.exists(
-                `${plugin.settings.basePath}/.git`
-            );
-            if (repoExists) {
-                const modal = new GeneralModal(plugin, {
-                    options: ["NO", "YES"],
-                    placeholder:
-                        "Do you really want to delete the repository (.git directory)? plugin action cannot be undone.",
-                    onlySelection: true,
-                });
-                const shouldDelete = (await modal.openAndGetResult()) === "YES";
-                if (shouldDelete) {
-                    await app.vault.adapter.rmdir(
-                        `${plugin.settings.basePath}/.git`,
-                        true
-                    );
-                    new Notice(
-                        "Successfully deleted repository. Reloading plugin..."
-                    );
-                    plugin.unloadPlugin();
-                    await plugin.init({ fromReload: true });
-                }
-            } else {
-                new Notice("No repository found");
-            }
+        callback: () => {
+            plugin.promptDeleteRepo().catch((e) => plugin.displayError(e));
         },
     });
 
     plugin.addCommand({
         id: "init-repo",
         name: "Initialize a new repo",
-        callback: () =>
-            plugin.createNewRepo().catch((e) => plugin.displayError(e)),
+        callback: () => {
+            plugin.promptInitRepo().catch((e) => plugin.displayError(e));
+        },
     });
 
     plugin.addCommand({
         id: "clone-repo",
         name: "Clone an existing remote repo",
-        callback: () =>
-            plugin.cloneNewRepo().catch((e) => plugin.displayError(e)),
+        callback: () => {
+            plugin.promptCloneRepo().catch((e) => plugin.displayError(e));
+        },
     });
 
     plugin.addCommand({
         id: "list-changed-files",
         name: "List changed files",
         callback: async () => {
-            if (!(await plugin.isAllInitialized())) return;
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            if (!repo.ready) return;
 
             try {
-                const status = await plugin.updateCachedStatus();
+                const status = await repo.updateCachedStatus();
                 if (status.changed.length + status.staged.length > 500) {
                     plugin.displayError("Too many changes to display");
                     return;
@@ -453,12 +519,48 @@ export function addCommmands(plugin: ObsidianGit) {
             const pause = !plugin.localStorage.getPausedAutomatics();
             plugin.localStorage.setPausedAutomatics(pause);
             if (pause) {
-                plugin.automaticsManager.unload();
+                for (const repo of plugin.repos.values()) {
+                    repo.automatics.unload();
+                }
                 new Notice(`Paused automatic routines.`);
             } else {
-                plugin.automaticsManager.reload("commit", "push", "pull");
+                for (const repo of plugin.repos.values()) {
+                    repo.automatics.reload("commit", "push", "pull");
+                }
                 new Notice(`Resumed automatic routines.`);
             }
+        },
+    });
+
+    plugin.addCommand({
+        id: "switch-active-repo",
+        name: "Switch active repo",
+        callback: () => {
+            new RepoSelectorModal(plugin).open();
+        },
+    });
+
+    plugin.addCommand({
+        id: "pause-automatics-this-repo",
+        name: "Pause automatics for this repo",
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            plugin.localStorage.setAutomaticsPausedForRepo(repo.id, true);
+            repo.automatics.unload();
+            new Notice(`[${repo.displayName}] Automatics paused.`);
+        },
+    });
+
+    plugin.addCommand({
+        id: "resume-automatics-this-repo",
+        name: "Resume automatics for this repo",
+        callback: () => {
+            const repo = requireActiveRepo(plugin);
+            if (!repo) return;
+            plugin.localStorage.setAutomaticsPausedForRepo(repo.id, false);
+            void repo.automatics.init();
+            new Notice(`[${repo.displayName}] Automatics resumed.`);
         },
     });
 
@@ -466,9 +568,9 @@ export function addCommmands(plugin: ObsidianGit) {
         id: "raw-command",
         name: "Raw command",
         checkCallback: (checking) => {
-            const gitManager = plugin.gitManager;
+            const repo = plugin.activeRepo();
+            const gitManager = repo?.gitManager;
             if (checking) {
-                // only available on desktop
                 return gitManager instanceof SimpleGit;
             } else {
                 plugin.tools
@@ -512,7 +614,9 @@ export function addCommmands(plugin: ObsidianGit) {
                     plugin.hunkActions.editor !== undefined
                 );
             }
-            plugin.promiseQueue.addTask(() => plugin.hunkActions.stageHunk());
+            const repo = plugin.activeRepo();
+            if (!repo) return;
+            repo.promiseQueue.addTask(() => plugin.hunkActions.stageHunk());
         },
     });
 

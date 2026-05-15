@@ -192,4 +192,117 @@ export class LocalStorageSettings {
             value
         );
     }
+
+    // Active-repo override (Section 6.4 of the spec)
+    getActiveRepoOverride(): string | null {
+        return this.app.loadLocalStorage(
+            this.prefix + "active-repo-override"
+        ) as string | null;
+    }
+
+    setActiveRepoOverride(repoId: string | null): void {
+        if (repoId === null) {
+            this.app.saveLocalStorage(
+                this.prefix + "active-repo-override",
+                null
+            );
+        } else {
+            this.app.saveLocalStorage(
+                this.prefix + "active-repo-override",
+                repoId
+            );
+        }
+    }
+
+    // Ignored externally-inited paths (Section 5.2)
+    getIgnoredRepoPaths(): string[] {
+        const raw = this.app.loadLocalStorage(
+            this.prefix + "ignored-repo-paths"
+        ) as string | null;
+        if (!raw) return [];
+        try {
+            const arr = JSON.parse(raw) as unknown;
+            return Array.isArray(arr)
+                ? arr.filter((x): x is string => typeof x === "string")
+                : [];
+        } catch {
+            return [];
+        }
+    }
+
+    setIgnoredRepoPaths(paths: string[]): void {
+        this.app.saveLocalStorage(
+            this.prefix + "ignored-repo-paths",
+            JSON.stringify(paths)
+        );
+    }
+
+    addIgnoredRepoPath(path: string): void {
+        const list = this.getIgnoredRepoPaths();
+        if (!list.includes(path)) {
+            list.push(path);
+            this.setIgnoredRepoPaths(list);
+        }
+    }
+
+    // Per-repo automatic pause (Section 7.1)
+    getPausedAutomaticsByRepo(): Set<string> {
+        const raw = this.app.loadLocalStorage(
+            this.prefix + "paused-automatics-by-repo"
+        ) as string | null;
+        if (!raw) return new Set();
+        try {
+            const arr = JSON.parse(raw) as unknown;
+            return new Set(
+                Array.isArray(arr)
+                    ? arr.filter((x): x is string => typeof x === "string")
+                    : []
+            );
+        } catch {
+            return new Set();
+        }
+    }
+
+    setPausedAutomaticsByRepo(set: Set<string>): void {
+        this.app.saveLocalStorage(
+            this.prefix + "paused-automatics-by-repo",
+            JSON.stringify(Array.from(set))
+        );
+    }
+
+    isAutomaticsPausedForRepo(repoId: string): boolean {
+        return this.getPausedAutomaticsByRepo().has(repoId);
+    }
+
+    setAutomaticsPausedForRepo(repoId: string, paused: boolean): void {
+        const set = this.getPausedAutomaticsByRepo();
+        if (paused) set.add(repoId);
+        else set.delete(repoId);
+        this.setPausedAutomaticsByRepo(set);
+    }
+
+    // Collapsed-section state for Source Control view (Section 8.1)
+    getCollapsedRepos(): Set<string> {
+        const raw = this.app.loadLocalStorage(
+            this.prefix + "collapsed-repos"
+        ) as string | null;
+        if (!raw) return new Set();
+        try {
+            const arr = JSON.parse(raw) as unknown;
+            return new Set(
+                Array.isArray(arr)
+                    ? arr.filter((x): x is string => typeof x === "string")
+                    : []
+            );
+        } catch {
+            return new Set();
+        }
+    }
+
+    setCollapsedRepos(set: Set<string>): void {
+        this.app.saveLocalStorage(
+            this.prefix + "collapsed-repos",
+            JSON.stringify(Array.from(set))
+        );
+    }
 }

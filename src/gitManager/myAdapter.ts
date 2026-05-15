@@ -6,6 +6,7 @@
 import type { DataAdapter, Vault } from "obsidian";
 import { normalizePath, TFile } from "obsidian";
 import type ObsidianGit from "../main";
+import type { IsomorphicGit } from "./isomorphicGit";
 
 export class MyAdapter {
     promises: any = {};
@@ -15,14 +16,15 @@ export class MyAdapter {
     indexctime: number | undefined;
     indexmtime: number | undefined;
     lastBasePath: string | undefined;
+    private readonly git: IsomorphicGit;
+    private readonly plugin: ObsidianGit;
 
-    constructor(
-        vault: Vault,
-        private readonly plugin: ObsidianGit
-    ) {
+    constructor(vault: Vault, git: IsomorphicGit) {
+        this.git = git;
+        this.plugin = git.plugin;
         this.adapter = vault.adapter;
         this.vault = vault;
-        this.lastBasePath = this.plugin.settings.basePath;
+        this.lastBasePath = this.git.repoConfig.path;
 
         this.promises.readFile = this.readFile.bind(this);
         this.promises.writeFile = this.writeFile.bind(this);
@@ -48,9 +50,9 @@ export class MyAdapter {
             }
         } else {
             if (path.endsWith(this.gitDir + "/index")) {
-                if (this.plugin.settings.basePath != this.lastBasePath) {
+                if (this.git.repoConfig.path != this.lastBasePath) {
                     this.clearIndex();
-                    this.lastBasePath = this.plugin.settings.basePath;
+                    this.lastBasePath = this.git.repoConfig.path;
                     return this.adapter.readBinary(path);
                 }
                 return this.index ?? this.adapter.readBinary(path);
@@ -193,9 +195,7 @@ export class MyAdapter {
     async saveAndClear(): Promise<void> {
         if (this.index !== undefined) {
             await this.adapter.writeBinary(
-                this.plugin.gitManager.getRelativeVaultPath(
-                    this.gitDir + "/index"
-                ),
+                this.git.getRelativeVaultPath(this.gitDir + "/index"),
                 this.index,
                 {
                     ctime: this.indexctime,
@@ -213,7 +213,7 @@ export class MyAdapter {
     }
 
     private get gitDir(): string {
-        return this.plugin.settings.gitDir || ".git";
+        return this.git.repoConfig.gitDir || ".git";
     }
 
     private maybeLog(_: string) {
