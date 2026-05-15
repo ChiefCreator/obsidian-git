@@ -974,48 +974,7 @@ export default class ObsidianGit extends Plugin {
 
     async saveSettings() {
         this.settingsTab?.beforeSaveSettings();
-        // Propagate legacy top-level field writes (made by the old settings UI)
-        // back into `globalRepoDefaults` so per-repo aggregates see the change.
-        this.syncLegacyFieldsToGlobalDefaults();
         await this.saveData(this.settings);
-    }
-
-    /**
-     * Copy legacy top-level per-repo fields back into `globalRepoDefaults`.
-     * Called inside `saveSettings()` so UI edits to legacy fields take effect.
-     */
-    syncLegacyFieldsToGlobalDefaults(): void {
-        const s = this.settings;
-        const g = s.globalRepoDefaults;
-        if (!g) return;
-        g.commitMessage = s.commitMessage ?? g.commitMessage;
-        g.autoCommitMessage = s.autoCommitMessage ?? g.autoCommitMessage;
-        g.commitMessageScript = s.commitMessageScript ?? g.commitMessageScript;
-        g.commitDateFormat = s.commitDateFormat ?? g.commitDateFormat;
-        g.autoSaveInterval = s.autoSaveInterval ?? g.autoSaveInterval;
-        g.autoPushInterval = s.autoPushInterval ?? g.autoPushInterval;
-        g.autoPullInterval = s.autoPullInterval ?? g.autoPullInterval;
-        g.autoPullOnBoot = s.autoPullOnBoot ?? g.autoPullOnBoot;
-        g.autoCommitOnlyStaged =
-            s.autoCommitOnlyStaged ?? g.autoCommitOnlyStaged;
-        g.syncMethod = s.syncMethod ?? g.syncMethod;
-        g.mergeStrategy = s.mergeStrategy ?? g.mergeStrategy;
-        g.disablePush = s.disablePush ?? g.disablePush;
-        g.pullBeforePush = s.pullBeforePush ?? g.pullBeforePush;
-        g.differentIntervalCommitAndPush =
-            s.differentIntervalCommitAndPush ??
-            g.differentIntervalCommitAndPush;
-        g.customMessageOnAutoBackup =
-            s.customMessageOnAutoBackup ?? g.customMessageOnAutoBackup;
-        g.autoBackupAfterFileChange =
-            s.autoBackupAfterFileChange ?? g.autoBackupAfterFileChange;
-        g.setLastSaveToLastCommit =
-            s.setLastSaveToLastCommit ?? g.setLastSaveToLastCommit;
-        g.updateSubmodules = s.updateSubmodules ?? g.updateSubmodules;
-        g.submoduleRecurseCheckout =
-            s.submoduleRecurseCheckout ?? g.submoduleRecurseCheckout;
-        g.listChangedFilesInMessageBody =
-            s.listChangedFilesInMessageBody ?? g.listChangedFilesInMessageBody;
     }
 
     get useSimpleGit(): boolean {
@@ -1257,9 +1216,7 @@ export default class ObsidianGit extends Plugin {
         if (raw === undefined) return;
         const repoPath = normalizeRepoPath(raw);
         if (
-            this.settings.repos.some((r) =>
-                repoPathsOverlap(r.path, repoPath)
-            )
+            this.settings.repos.some((r) => repoPathsOverlap(r.path, repoPath))
         ) {
             this.displayError(
                 `Path "${repoPath || "<root>"}" overlaps an existing registered repo.`
@@ -1373,9 +1330,7 @@ export default class ObsidianGit extends Plugin {
         const adapter = this.app.vault.adapter;
         const found: string[] = [];
         const ignored = new Set(this.localStorage.getIgnoredRepoPaths());
-        const registeredPaths = new Set(
-            this.settings.repos.map((r) => r.path)
-        );
+        const registeredPaths = new Set(this.settings.repos.map((r) => r.path));
 
         const walk = async (dir: string) => {
             let list: { folders: string[] };
@@ -1390,8 +1345,7 @@ export default class ObsidianGit extends Plugin {
                 if (lastSeg === ".obsidian") continue;
                 const skip = Array.from(registeredPaths).some(
                     (rp) =>
-                        rp !== "" &&
-                        (rel === rp || rel.startsWith(rp + "/"))
+                        rp !== "" && (rel === rp || rel.startsWith(rp + "/"))
                 );
                 if (skip) continue;
                 const gitPath = rel + "/.git";

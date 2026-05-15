@@ -26,6 +26,7 @@ import type ObsidianGit from "src/main";
 import type {
     ObsidianGitSettings,
     MergeStrategy,
+    PerRepoSettings,
     ShowAuthorInHistoryView,
     SyncMethod,
 } from "src/types";
@@ -47,6 +48,14 @@ const LINE_AUTHOR_FEATURE_WIKI_LINK =
 
 export class ObsidianGitSettingsTab extends PluginSettingTab {
     lineAuthorColorSettings: Map<"oldest" | "newest", Setting> = new Map();
+
+    /**
+     * UI-only scope selector state. "global" edits `globalRepoDefaults`;
+     * a repoId edits `repos.find(r => r.id === editingScope).overrides`.
+     * Not persisted — resets to "global" on each plugin reload.
+     */
+    private editingScope: string = "global";
+
     constructor(
         app: App,
         private plugin: ObsidianGit
@@ -64,8 +73,16 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
         const { containerEl } = this;
         const plugin: ObsidianGit = this.plugin;
 
+        // Drop a stale scope if the chosen repo was removed since last render.
+        if (
+            this.editingScope !== "global" &&
+            !plugin.settings.repos.some((r) => r.id === this.editingScope)
+        ) {
+            this.editingScope = "global";
+        }
+
         let commitOrSync: string;
-        if (plugin.settings.differentIntervalCommitAndPush) {
+        if (this.getEffective("differentIntervalCommitAndPush")) {
             commitOrSync = "commit";
         } else {
             commitOrSync = "commit-and-sync";
@@ -77,6 +94,7 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
 
         // Repositories section (new, multi-repo)
         this.renderRepositoriesSection();
+        this.renderScopeSelector();
 
         if (!gitReady) {
             containerEl.createEl("p", {
@@ -85,282 +103,119 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
             containerEl.createEl("br");
         }
 
-        let setting: Setting;
         if (gitReady) {
             new Setting(containerEl).setName("Automatic").setHeading();
-            new Setting(containerEl)
-                .setName("Split timers for automatic commit and sync")
-                .setDesc(
-                    "Enable to use one interval for commit and another for sync."
-                )
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(
-                            plugin.settings.differentIntervalCommitAndPush
-                        )
-                        .onChange(async (value) => {
-                            plugin.settings.differentIntervalCommitAndPush =
-                                value;
-                            await plugin.saveSettings();
-                            for (const r of plugin.repos.values())
-                                r.automatics.reload("commit", "push");
-                            this.refreshDisplayWithDelay();
-                        })
-                );
+            this.addPerRepoToggle({
+                name: "Split timers for automatic commit and sync",
+                desc: "Enable to use one interval for commit and another for sync.",
+                key: "differentIntervalCommitAndPush",
+                afterChange: () => this.refreshDisplayWithDelay(),
+            });
 
-            new Setting(containerEl)
-                .setName(`Auto ${commitOrSync} interval (minutes)`)
-                .setDesc(
-                    `${
-                        plugin.settings.differentIntervalCommitAndPush
-                            ? "Commit"
-                            : "Commit and sync"
-                    } changes every X minutes. Set to 0 (default) to disable. (See below setting for further configuration!)`
-                )
-                .addText((text) => {
-                    text.inputEl.type = "number";
-                    this.setNonDefaultValue({
-                        text,
-                        settingsProperty: "autoSaveInterval",
-                    });
-                    text.setPlaceholder(
-                        String(DEFAULT_SETTINGS.autoSaveInterval)
-                    );
-                    text.onChange(async (value) => {
-                        if (value !== "") {
-                            plugin.settings.autoSaveInterval = Number(value);
-                        } else {
-                            plugin.settings.autoSaveInterval =
-                                DEFAULT_SETTINGS.autoSaveInterval;
-                        }
-                        await plugin.saveSettings();
-                        for (const r of plugin.repos.values())
-                            r.automatics.reload("commit");
-                    });
-                });
+            this.addPerRepoNumberInput({
+                name: `Auto ${commitOrSync} interval (minutes)`,
+                desc: `${
+                    this.getEffective("differentIntervalCommitAndPush")
+                        ? "Commit"
+                        : "Commit and sync"
+                } changes every X minutes. Set to 0 (default) to disable. (See below setting for further configuration!)`,
+                key: "autoSaveInterval",
+            });
 
-            setting = new Setting(containerEl)
-                .setName(`Auto ${commitOrSync} after stopping file edits`)
-                .setDesc(
-                    `Requires the ${commitOrSync} interval not to be 0.
+            this.addPerRepoToggle({
+                name: `Auto ${commitOrSync} after stopping file edits`,
+                desc: `Requires the ${commitOrSync} interval not to be 0.
                         If turned on, do auto ${commitOrSync} every ${formatMinutes(
-                            plugin.settings.autoSaveInterval
+                            this.getEffective("autoSaveInterval")
                         )} after stopping file edits.
-                        This also prevents auto ${commitOrSync} while editing a file. If turned off, it's independent from the last file edit.`
-                )
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.autoBackupAfterFileChange)
-                        .onChange(async (value) => {
-                            plugin.settings.autoBackupAfterFileChange = value;
-                            this.refreshDisplayWithDelay();
+                        This also prevents auto ${commitOrSync} while editing a file. If turned off, it's independent from the last file edit.`,
+                key: "autoBackupAfterFileChange",
+                disabledIf: this.getEffective("setLastSaveToLastCommit"),
+                afterChange: () => this.refreshDisplayWithDelay(),
+            });
 
-                            await plugin.saveSettings();
-                            for (const r of plugin.repos.values())
-                                r.automatics.reload("commit");
-                        })
-                );
-            this.mayDisableSetting(
-                setting,
-                plugin.settings.setLastSaveToLastCommit
-            );
+            this.addPerRepoToggle({
+                name: `Auto ${commitOrSync} after latest commit`,
+                desc: `If turned on, sets last auto ${commitOrSync} timestamp to the latest commit timestamp. This reduces the frequency of auto ${commitOrSync} when doing manual commits.`,
+                key: "setLastSaveToLastCommit",
+                disabledIf: this.getEffective("autoBackupAfterFileChange"),
+                afterChange: () => this.refreshDisplayWithDelay(),
+            });
 
-            setting = new Setting(containerEl)
-                .setName(`Auto ${commitOrSync} after latest commit`)
-                .setDesc(
-                    `If turned on, sets last auto ${commitOrSync} timestamp to the latest commit timestamp. This reduces the frequency of auto ${commitOrSync} when doing manual commits.`
-                )
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.setLastSaveToLastCommit)
-                        .onChange(async (value) => {
-                            plugin.settings.setLastSaveToLastCommit = value;
-                            await plugin.saveSettings();
-                            for (const r of plugin.repos.values())
-                                r.automatics.reload("commit");
-                            this.refreshDisplayWithDelay();
-                        })
-                );
-            this.mayDisableSetting(
-                setting,
-                plugin.settings.autoBackupAfterFileChange
-            );
+            this.addPerRepoNumberInput({
+                name: `Auto push interval (minutes)`,
+                desc: "Push commits every X minutes. Set to 0 (default) to disable.",
+                key: "autoPushInterval",
+                disabledIf: !this.getEffective(
+                    "differentIntervalCommitAndPush"
+                ),
+            });
 
-            setting = new Setting(containerEl)
-                .setName(`Auto push interval (minutes)`)
-                .setDesc(
-                    "Push commits every X minutes. Set to 0 (default) to disable."
-                )
-                .addText((text) => {
-                    text.inputEl.type = "number";
-                    this.setNonDefaultValue({
-                        text,
-                        settingsProperty: "autoPushInterval",
-                    });
-                    text.setPlaceholder(
-                        String(DEFAULT_SETTINGS.autoPushInterval)
-                    );
-                    text.onChange(async (value) => {
-                        if (value !== "") {
-                            plugin.settings.autoPushInterval = Number(value);
-                        } else {
-                            plugin.settings.autoPushInterval =
-                                DEFAULT_SETTINGS.autoPushInterval;
-                        }
-                        await plugin.saveSettings();
-                        for (const r of plugin.repos.values())
-                            r.automatics.reload("push");
-                    });
-                });
-            this.mayDisableSetting(
-                setting,
-                !plugin.settings.differentIntervalCommitAndPush
-            );
+            this.addPerRepoNumberInput({
+                name: "Auto pull interval (minutes)",
+                desc: "Pull changes every X minutes. Set to 0 (default) to disable.",
+                key: "autoPullInterval",
+            });
 
-            new Setting(containerEl)
-                .setName("Auto pull interval (minutes)")
-                .setDesc(
-                    "Pull changes every X minutes. Set to 0 (default) to disable."
-                )
-                .addText((text) => {
-                    text.inputEl.type = "number";
-                    this.setNonDefaultValue({
-                        text,
-                        settingsProperty: "autoPullInterval",
-                    });
-                    text.setPlaceholder(
-                        String(DEFAULT_SETTINGS.autoPullInterval)
-                    );
-                    text.onChange(async (value) => {
-                        if (value !== "") {
-                            plugin.settings.autoPullInterval = Number(value);
-                        } else {
-                            plugin.settings.autoPullInterval =
-                                DEFAULT_SETTINGS.autoPullInterval;
-                        }
-                        await plugin.saveSettings();
-                        for (const r of plugin.repos.values())
-                            r.automatics.reload("pull");
-                    });
-                });
+            this.addPerRepoToggle({
+                name: `Auto ${commitOrSync} only staged files`,
+                desc: `If turned on, only staged files are committed on ${commitOrSync}. If turned off, all changed files are committed.`,
+                key: "autoCommitOnlyStaged",
+            });
 
-            new Setting(containerEl)
-                .setName(`Auto ${commitOrSync} only staged files`)
-                .setDesc(
-                    `If turned on, only staged files are committed on ${commitOrSync}. If turned off, all changed files are committed.`
-                )
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.autoCommitOnlyStaged)
-                        .onChange(async (value) => {
-                            plugin.settings.autoCommitOnlyStaged = value;
-                            await plugin.saveSettings();
-                        })
-                );
+            this.addPerRepoToggle({
+                name: `Specify custom commit message on auto ${commitOrSync}`,
+                desc: "You will get a pop up to specify your message.",
+                key: "customMessageOnAutoBackup",
+                afterChange: () => this.refreshDisplayWithDelay(),
+            });
 
-            new Setting(containerEl)
-                .setName(
-                    `Specify custom commit message on auto ${commitOrSync}`
-                )
-                .setDesc("You will get a pop up to specify your message.")
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.customMessageOnAutoBackup)
-                        .onChange(async (value) => {
-                            plugin.settings.customMessageOnAutoBackup = value;
-                            await plugin.saveSettings();
-                            this.refreshDisplayWithDelay();
-                        })
-                );
-
-            setting = new Setting(containerEl)
-                .setName(`Commit message on auto ${commitOrSync}`)
-                .setDesc(
+            this.addPerRepoTextArea({
+                name: `Commit message on auto ${commitOrSync}`,
+                desc:
                     "Available placeholders: {{date}}" +
-                        " (see below), {{hostname}} (see below), {{numFiles}} (number of changed files in the commit) and {{files}} (changed files in commit message)."
-                )
-                .addTextArea((text) => {
-                    text.setPlaceholder(
-                        DEFAULT_SETTINGS.autoCommitMessage
-                    ).onChange(async (value) => {
-                        if (value === "") {
-                            plugin.settings.autoCommitMessage =
-                                DEFAULT_SETTINGS.autoCommitMessage;
-                        } else {
-                            plugin.settings.autoCommitMessage = value;
-                        }
-                        await plugin.saveSettings();
-                    });
-                    this.setNonDefaultValue({
-                        text,
-                        settingsProperty: "autoCommitMessage",
-                    });
-                });
-            this.mayDisableSetting(
-                setting,
-                plugin.settings.customMessageOnAutoBackup
-            );
+                    " (see below), {{hostname}} (see below), {{numFiles}} (number of changed files in the commit) and {{files}} (changed files in commit message).",
+                key: "autoCommitMessage",
+                disabledIf: this.getEffective("customMessageOnAutoBackup"),
+            });
 
             new Setting(containerEl).setName("Commit message").setHeading();
 
-            const manualCommitMessageSetting = new Setting(containerEl)
-                .setName("Commit message on manual commit")
-                .setDesc(
+            this.addPerRepoTextArea({
+                name: "Commit message on manual commit",
+                desc:
                     "Available placeholders: {{date}}" +
-                        " (see below), {{hostname}} (see below), {{numFiles}} (number of changed files in the commit) and {{files}} (changed files in commit message). Leave empty to require manual input on each commit."
-                );
-            manualCommitMessageSetting.addTextArea((text) => {
-                manualCommitMessageSetting.addButton((button) => {
-                    button
-                        .setIcon("reset")
-                        .setTooltip(
-                            `Set to default: "${DEFAULT_SETTINGS.commitMessage}"`
-                        )
-                        .onClick(() => {
-                            text.setValue(DEFAULT_SETTINGS.commitMessage);
-                            text.onChanged();
-                        });
-                });
-                text.setValue(plugin.settings.commitMessage);
-                text.onChange(async (value) => {
-                    plugin.settings.commitMessage = value;
-                    await plugin.saveSettings();
-                });
+                    " (see below), {{hostname}} (see below), {{numFiles}} (number of changed files in the commit) and {{files}} (changed files in commit message). Leave empty to require manual input on each commit.",
+                key: "commitMessage",
             });
 
             if (Platform.isDesktopApp)
-                new Setting(containerEl)
-                    .setName("Commit message script")
-                    .setDesc(
-                        "A script that is run using 'sh -c' to generate the commit message. May be used to generate commit messages using AI tools. Available placeholders: {{hostname}}, {{date}}."
-                    )
-                    .addText((text) => {
-                        text.onChange(async (value) => {
-                            if (value === "") {
-                                plugin.settings.commitMessageScript =
-                                    DEFAULT_SETTINGS.commitMessageScript;
-                            } else {
-                                plugin.settings.commitMessageScript = value;
-                            }
-                            await plugin.saveSettings();
-                        });
-                        this.setNonDefaultValue({
-                            text,
-                            settingsProperty: "commitMessageScript",
-                        });
-                    });
+                this.addPerRepoTextInput({
+                    name: "Commit message script",
+                    desc: "A script that is run using 'sh -c' to generate the commit message. May be used to generate commit messages using AI tools. Available placeholders: {{hostname}}, {{date}}.",
+                    key: "commitMessageScript",
+                });
 
-            const datePlaceholderSetting = new Setting(containerEl)
-                .setName("{{date}} placeholder format")
-                .addMomentFormat((text) =>
-                    text
-                        .setDefaultFormat(plugin.settings.commitDateFormat)
-                        .setValue(plugin.settings.commitDateFormat)
-                        .onChange(async (value) => {
-                            plugin.settings.commitDateFormat = value;
-                            await plugin.saveSettings();
-                        })
-                );
+            const datePlaceholderSetting = new Setting(containerEl).setName(
+                "{{date}} placeholder format"
+            );
+            datePlaceholderSetting.addMomentFormat((text) => {
+                const inherited = this.getInherited("commitDateFormat");
+                text.setDefaultFormat(inherited);
+                text.setValue(this.getEffective("commitDateFormat"));
+                text.onChange(async (value) => {
+                    if (value === "" && this.editingScope !== "global") {
+                        await this.clearOverride("commitDateFormat");
+                        this.refreshDisplayWithDelay();
+                    } else {
+                        await this.setPerRepoValue("commitDateFormat", value);
+                    }
+                });
+            });
+            this.addResetButtonIfOverridden(
+                datePlaceholderSetting,
+                "commitDateFormat"
+            );
 
             datePlaceholderSetting.descEl.createSpan({
                 text: ` Specify custom date format. E.g. "${DATE_TIME_FORMAT_SECONDS}. See `,
@@ -395,78 +250,50 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                     button.setButtonText("Preview").onClick(async () => {
                         const commitMessagePreview =
                             await plugin.gitManager.formatCommitMessage(
-                                plugin.settings.commitMessage
+                                this.getEffective("commitMessage")
                             );
                         new Notice(`${commitMessagePreview}`);
                     })
                 );
 
-            new Setting(containerEl)
-                .setName("List filenames affected by commit in the commit body")
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.listChangedFilesInMessageBody)
-                        .onChange(async (value) => {
-                            plugin.settings.listChangedFilesInMessageBody =
-                                value;
-                            await plugin.saveSettings();
-                        })
-                );
+            this.addPerRepoToggle({
+                name: "List filenames affected by commit in the commit body",
+                key: "listChangedFilesInMessageBody",
+            });
 
             new Setting(containerEl).setName("Pull").setHeading();
 
-            if (plugin.gitManager instanceof SimpleGit)
-                new Setting(containerEl)
-                    .setName("Merge strategy")
-                    .setDesc(
-                        "Decide how to integrate commits from your remote branch into your local branch."
-                    )
-                    .addDropdown((dropdown) => {
-                        const options: Record<SyncMethod, string> = {
-                            merge: "Merge",
-                            rebase: "Rebase",
-                            reset: "Other sync service (Only updates the HEAD without touching the working directory)",
-                        };
-                        dropdown.addOptions(options);
-                        dropdown.setValue(plugin.settings.syncMethod);
-
-                        dropdown.onChange(async (option: SyncMethod) => {
-                            plugin.settings.syncMethod = option;
-                            await plugin.saveSettings();
-                        });
-                    });
-
-            new Setting(containerEl)
-                .setName("Merge strategy on conflicts")
-                .setDesc(
-                    "Decide how to solve conflicts when pulling remote changes. This can be used to favor your local changes or the remote changes automatically."
-                )
-                .addDropdown((dropdown) => {
-                    const options: Record<MergeStrategy, string> = {
-                        none: "None (git default)",
-                        ours: "Our changes",
-                        theirs: "Their changes",
-                    };
-                    dropdown.addOptions(options);
-                    dropdown.setValue(plugin.settings.mergeStrategy);
-
-                    dropdown.onChange(async (option: MergeStrategy) => {
-                        plugin.settings.mergeStrategy = option;
-                        await plugin.saveSettings();
-                    });
+            if (plugin.gitManager instanceof SimpleGit) {
+                const syncMethodOptions: Record<SyncMethod, string> = {
+                    merge: "Merge",
+                    rebase: "Rebase",
+                    reset: "Other sync service (Only updates the HEAD without touching the working directory)",
+                };
+                this.addPerRepoDropdown<SyncMethod>({
+                    name: "Merge strategy",
+                    desc: "Decide how to integrate commits from your remote branch into your local branch.",
+                    key: "syncMethod",
+                    options: syncMethodOptions,
                 });
+            }
 
-            new Setting(containerEl)
-                .setName("Pull on startup")
-                .setDesc("Automatically pull commits when Obsidian starts.")
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.autoPullOnBoot)
-                        .onChange(async (value) => {
-                            plugin.settings.autoPullOnBoot = value;
-                            await plugin.saveSettings();
-                        })
-                );
+            const mergeStrategyOptions: Record<MergeStrategy, string> = {
+                none: "None (git default)",
+                ours: "Our changes",
+                theirs: "Their changes",
+            };
+            this.addPerRepoDropdown<MergeStrategy>({
+                name: "Merge strategy on conflicts",
+                desc: "Decide how to solve conflicts when pulling remote changes. This can be used to favor your local changes or the remote changes automatically.",
+                key: "mergeStrategy",
+                options: mergeStrategyOptions,
+            });
+
+            this.addPerRepoToggle({
+                name: "Pull on startup",
+                desc: "Automatically pull commits when Obsidian starts.",
+                key: "autoPullOnBoot",
+            });
 
             new Setting(containerEl)
                 .setName("Commit-and-sync")
@@ -475,35 +302,27 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                 )
                 .setHeading();
 
-            setting = new Setting(containerEl)
+            const pushOnSyncSetting = new Setting(containerEl)
                 .setName("Push on commit-and-sync")
                 .setDesc(
-                    `Most of the time you want to push after committing. Turning this off turns a commit-and-sync action into commit ${plugin.settings.pullBeforePush ? "and pull " : ""}only. It will still be called commit-and-sync.`
+                    `Most of the time you want to push after committing. Turning this off turns a commit-and-sync action into commit ${this.getEffective("pullBeforePush") ? "and pull " : ""}only. It will still be called commit-and-sync.`
                 )
                 .addToggle((toggle) =>
                     toggle
-                        .setValue(!plugin.settings.disablePush)
+                        .setValue(!this.getEffective("disablePush"))
                         .onChange(async (value) => {
-                            plugin.settings.disablePush = !value;
+                            await this.setPerRepoValue("disablePush", !value);
                             this.refreshDisplayWithDelay();
-                            await plugin.saveSettings();
                         })
                 );
+            this.addResetButtonIfOverridden(pushOnSyncSetting, "disablePush");
 
-            new Setting(containerEl)
-                .setName("Pull on commit-and-sync")
-                .setDesc(
-                    `On commit-and-sync, pull commits as well. Turning this off turns a commit-and-sync action into commit ${plugin.settings.disablePush ? "" : "and push "}only.`
-                )
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.pullBeforePush)
-                        .onChange(async (value) => {
-                            plugin.settings.pullBeforePush = value;
-                            this.refreshDisplayWithDelay();
-                            await plugin.saveSettings();
-                        })
-                );
+            this.addPerRepoToggle({
+                name: "Pull on commit-and-sync",
+                desc: `On commit-and-sync, pull commits as well. Turning this off turns a commit-and-sync action into commit ${this.getEffective("disablePush") ? "" : "and push "}only.`,
+                key: "pullBeforePush",
+                afterChange: () => this.refreshDisplayWithDelay(),
+            });
 
             if (plugin.gitManager instanceof SimpleGit) {
                 new Setting(containerEl)
@@ -853,34 +672,18 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
             .setHeading();
 
         if (plugin.gitManager instanceof SimpleGit) {
-            new Setting(containerEl)
-                .setName("Update submodules")
-                .setDesc(
-                    '"Commit-and-sync" and "pull" takes care of submodules. Missing features: Conflicted files, count of pulled/pushed/committed files. Tracking branch needs to be set for each submodule.'
-                )
-                .addToggle((toggle) =>
-                    toggle
-                        .setValue(plugin.settings.updateSubmodules)
-                        .onChange(async (value) => {
-                            plugin.settings.updateSubmodules = value;
-                            await plugin.saveSettings();
-                        })
-                );
-            if (plugin.settings.updateSubmodules) {
-                new Setting(containerEl)
-                    .setName("Submodule recurse checkout/switch")
-                    .setDesc(
-                        "Whenever a checkout happens on the root repository, recurse the checkout on the submodules (if the branches exist)."
-                    )
-                    .addToggle((toggle) =>
-                        toggle
-                            .setValue(plugin.settings.submoduleRecurseCheckout)
-                            .onChange(async (value) => {
-                                plugin.settings.submoduleRecurseCheckout =
-                                    value;
-                                await plugin.saveSettings();
-                            })
-                    );
+            this.addPerRepoToggle({
+                name: "Update submodules",
+                desc: '"Commit-and-sync" and "pull" takes care of submodules. Missing features: Conflicted files, count of pulled/pushed/committed files. Tracking branch needs to be set for each submodule.',
+                key: "updateSubmodules",
+                afterChange: () => this.refreshDisplayWithDelay(),
+            });
+            if (this.getEffective("updateSubmodules")) {
+                this.addPerRepoToggle({
+                    name: "Submodule recurse checkout/switch",
+                    desc: "Whenever a checkout happens on the root repository, recurse the checkout on the submodules (if the branches exist).",
+                    key: "submoduleRecurseCheckout",
+                });
             }
         }
 
@@ -1060,6 +863,318 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                 keys.createEl("kbd", { text: "CTRL + SHIFT + I" });
             }
         }
+    }
+
+    /**
+     * Returns the RepoConfig currently being edited, or undefined when the
+     * scope is "global". Returns undefined if the selected repoId has since
+     * been removed.
+     */
+    private getEditingRepo(): RepoConfig | undefined {
+        if (this.editingScope === "global") return undefined;
+        return this.plugin.settings.repos.find(
+            (r) => r.id === this.editingScope
+        );
+    }
+
+    /** Value the field would inherit (i.e. the global default). */
+    private getInherited<K extends keyof PerRepoSettings>(
+        k: K
+    ): PerRepoSettings[K] {
+        return this.plugin.settings.globalRepoDefaults[k];
+    }
+
+    /** Effective value in the current scope: override (if any) → global default. */
+    private getEffective<K extends keyof PerRepoSettings>(
+        k: K
+    ): PerRepoSettings[K] {
+        const repo = this.getEditingRepo();
+        if (!repo) return this.getInherited(k);
+        const v = repo.overrides[k];
+        return v !== undefined ? v : this.getInherited(k);
+    }
+
+    /** True only when in repo scope and the key is explicitly set on `overrides`. */
+    private isOverridden(k: keyof PerRepoSettings): boolean {
+        const repo = this.getEditingRepo();
+        return repo !== undefined && k in repo.overrides;
+    }
+
+    /** Write to either `globalRepoDefaults` or the active repo's `overrides`. */
+    private async setPerRepoValue<K extends keyof PerRepoSettings>(
+        k: K,
+        v: PerRepoSettings[K]
+    ): Promise<void> {
+        const repo = this.getEditingRepo();
+        if (!repo) {
+            this.plugin.settings.globalRepoDefaults[k] = v;
+        } else {
+            (repo.overrides as PerRepoSettings)[k] = v;
+        }
+        await this.plugin.saveSettings();
+        this.applyAfterSave();
+    }
+
+    /**
+     * Drop the key from the active repo's `overrides`. No-op in global scope.
+     * Caller is responsible for refreshing the UI if it cares about the row's
+     * appearance (e.g. the reset button disappearing).
+     */
+    private async clearOverride(k: keyof PerRepoSettings): Promise<void> {
+        const repo = this.getEditingRepo();
+        if (!repo) return;
+        delete (repo.overrides as Record<string, unknown>)[k];
+        await this.plugin.saveSettings();
+        this.applyAfterSave();
+    }
+
+    /**
+     * Mirror legacy fields onto `this.plugin.settings` so the deprecated
+     * read-only consumers stay coherent, then reload automatics. In repo
+     * scope only that repo's automatics reload; in global scope every repo
+     * reloads (a global default can affect any repo that doesn't override it).
+     */
+    private applyAfterSave(): void {
+        this.plugin.mirrorLegacySettingsFields();
+        const repo = this.getEditingRepo();
+        if (repo) {
+            const aggregate = this.plugin.repos.get(repo.id);
+            aggregate?.automatics.reload("commit", "push", "pull");
+        } else {
+            for (const r of this.plugin.repos.values()) {
+                r.automatics.reload("commit", "push", "pull");
+            }
+        }
+    }
+
+    /**
+     * Render a per-repo boolean toggle row. Reads via `getEffective` and
+     * writes via `setPerRepoValue`. In repo scope, an overridden value gets
+     * a reset extra-button.
+     */
+    private addPerRepoToggle(opts: {
+        name: string;
+        desc?: string;
+        key: keyof PerRepoSettings;
+        disabledIf?: boolean;
+        afterChange?: () => void;
+    }): Setting {
+        const setting = new Setting(this.containerEl).setName(opts.name);
+        if (opts.desc) setting.setDesc(opts.desc);
+        setting.addToggle((toggle) =>
+            toggle
+                .setValue(this.getEffective(opts.key) as boolean)
+                .onChange(async (value) => {
+                    await this.setPerRepoValue(opts.key, value);
+                    opts.afterChange?.();
+                })
+        );
+        this.addResetButtonIfOverridden(setting, opts.key);
+        if (opts.disabledIf) this.mayDisableSetting(setting, opts.disabledIf);
+        return setting;
+    }
+
+    /**
+     * If we're in repo scope and the key is overridden, append a reset
+     * extra-button that drops the override and re-renders.
+     */
+    private addResetButtonIfOverridden(
+        setting: Setting,
+        key: keyof PerRepoSettings
+    ): void {
+        if (!this.isOverridden(key)) return;
+        setting.addExtraButton((btn) =>
+            btn
+                .setIcon("rotate-ccw")
+                .setTooltip("Reset to inherit from Global defaults")
+                .onClick(() => {
+                    this.clearOverride(key)
+                        .then(() => this.display())
+                        .catch((e) => this.plugin.displayError(e));
+                })
+        );
+    }
+
+    /**
+     * Render a per-repo number-input row.
+     *
+     * Empty input semantics:
+     * - In global scope: writes DEFAULT_SETTINGS[key] (matches legacy UX).
+     * - In repo scope: drops the override so the row inherits from globals.
+     *
+     * Placeholder semantics:
+     * - In global scope: DEFAULT_SETTINGS[key].
+     * - In repo scope: the inherited value, so the user sees what they would
+     *   fall back to.
+     */
+    private addPerRepoNumberInput(opts: {
+        name: string;
+        desc?: string;
+        key: keyof PerRepoSettings;
+        disabledIf?: boolean;
+        afterChange?: () => void;
+    }): Setting {
+        const setting = new Setting(this.containerEl).setName(opts.name);
+        if (opts.desc) setting.setDesc(opts.desc);
+        setting.addText((text) => {
+            text.inputEl.type = "number";
+
+            const inRepoScope = this.editingScope !== "global";
+            if (inRepoScope) {
+                text.setPlaceholder(String(this.getInherited(opts.key)));
+                if (this.isOverridden(opts.key)) {
+                    text.setValue(String(this.getEffective(opts.key)));
+                }
+            } else {
+                text.setPlaceholder(String(DEFAULT_SETTINGS[opts.key]));
+                const stored = this.getEffective(opts.key);
+                if (stored !== DEFAULT_SETTINGS[opts.key]) {
+                    text.setValue(String(stored));
+                }
+            }
+
+            text.onChange(async (value) => {
+                if (value === "") {
+                    if (this.editingScope === "global") {
+                        await this.setPerRepoValue(
+                            opts.key,
+                            DEFAULT_SETTINGS[opts.key]
+                        );
+                    } else {
+                        await this.clearOverride(opts.key);
+                        this.refreshDisplayWithDelay();
+                    }
+                } else {
+                    await this.setPerRepoValue(opts.key, Number(value));
+                }
+                opts.afterChange?.();
+            });
+        });
+        this.addResetButtonIfOverridden(setting, opts.key);
+        if (opts.disabledIf) this.mayDisableSetting(setting, opts.disabledIf);
+        return setting;
+    }
+
+    /**
+     * Render a per-repo multiline-text row.
+     *
+     * Empty input semantics mirror `addPerRepoNumberInput`:
+     * - Global scope, empty → DEFAULT_SETTINGS[key].
+     * - Repo scope,  empty → clearOverride(key).
+     */
+    private addPerRepoTextArea(opts: {
+        name: string;
+        desc?: string;
+        key: keyof PerRepoSettings;
+        disabledIf?: boolean;
+    }): Setting {
+        const setting = new Setting(this.containerEl).setName(opts.name);
+        if (opts.desc) setting.setDesc(opts.desc);
+        setting.addTextArea((text) => {
+            const inRepoScope = this.editingScope !== "global";
+            if (inRepoScope) {
+                text.setPlaceholder(String(this.getInherited(opts.key)));
+                if (this.isOverridden(opts.key)) {
+                    text.setValue(String(this.getEffective(opts.key)));
+                }
+            } else {
+                text.setPlaceholder(String(DEFAULT_SETTINGS[opts.key]));
+                const stored = this.getEffective(opts.key);
+                if (stored !== DEFAULT_SETTINGS[opts.key]) {
+                    text.setValue(String(stored));
+                }
+            }
+            text.onChange(async (value) => {
+                if (value === "") {
+                    if (this.editingScope === "global") {
+                        await this.setPerRepoValue(
+                            opts.key,
+                            DEFAULT_SETTINGS[opts.key]
+                        );
+                    } else {
+                        await this.clearOverride(opts.key);
+                        this.refreshDisplayWithDelay();
+                    }
+                } else {
+                    await this.setPerRepoValue(opts.key, value);
+                }
+            });
+        });
+        this.addResetButtonIfOverridden(setting, opts.key);
+        if (opts.disabledIf) this.mayDisableSetting(setting, opts.disabledIf);
+        return setting;
+    }
+
+    /**
+     * Render a per-repo single-line text input. Same value/placeholder/clear
+     * semantics as `addPerRepoTextArea`.
+     */
+    private addPerRepoTextInput(opts: {
+        name: string;
+        desc?: string;
+        key: keyof PerRepoSettings;
+        disabledIf?: boolean;
+    }): Setting {
+        const setting = new Setting(this.containerEl).setName(opts.name);
+        if (opts.desc) setting.setDesc(opts.desc);
+        setting.addText((text) => {
+            const inRepoScope = this.editingScope !== "global";
+            if (inRepoScope) {
+                text.setPlaceholder(String(this.getInherited(opts.key)));
+                if (this.isOverridden(opts.key)) {
+                    text.setValue(String(this.getEffective(opts.key)));
+                }
+            } else {
+                text.setPlaceholder(String(DEFAULT_SETTINGS[opts.key]));
+                const stored = this.getEffective(opts.key);
+                if (stored !== DEFAULT_SETTINGS[opts.key]) {
+                    text.setValue(String(stored));
+                }
+            }
+            text.onChange(async (value) => {
+                if (value === "") {
+                    if (this.editingScope === "global") {
+                        await this.setPerRepoValue(
+                            opts.key,
+                            DEFAULT_SETTINGS[opts.key]
+                        );
+                    } else {
+                        await this.clearOverride(opts.key);
+                        this.refreshDisplayWithDelay();
+                    }
+                } else {
+                    await this.setPerRepoValue(opts.key, value);
+                }
+            });
+        });
+        this.addResetButtonIfOverridden(setting, opts.key);
+        if (opts.disabledIf) this.mayDisableSetting(setting, opts.disabledIf);
+        return setting;
+    }
+
+    /**
+     * Render a per-repo dropdown. The current effective value is always
+     * shown selected; an overridden key gets a reset extra-button.
+     */
+    private addPerRepoDropdown<V extends string>(opts: {
+        name: string;
+        desc?: string;
+        key: keyof PerRepoSettings;
+        options: Record<V, string>;
+        afterChange?: () => void;
+    }): Setting {
+        const setting = new Setting(this.containerEl).setName(opts.name);
+        if (opts.desc) setting.setDesc(opts.desc);
+        setting.addDropdown((dd) => {
+            dd.addOptions(opts.options);
+            dd.setValue(this.getEffective(opts.key) as unknown as string);
+            dd.onChange(async (value) => {
+                await this.setPerRepoValue(opts.key, value);
+                opts.afterChange?.();
+            });
+        });
+        this.addResetButtonIfOverridden(setting, opts.key);
+        return setting;
     }
 
     mayDisableSetting(setting: Setting, disable: boolean) {
@@ -1608,32 +1723,26 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                     .onClick(() => new ScanReposModal(plugin).open())
             )
             .addButton((btn) =>
-                btn
-                    .setButtonText("Initialize new repo here…")
-                    .onClick(() => {
-                        plugin
-                            .promptInitRepo()
-                            .then(() => this.display())
-                            .catch((e) => plugin.displayError(e));
-                    })
+                btn.setButtonText("Initialize new repo here…").onClick(() => {
+                    plugin
+                        .promptInitRepo()
+                        .then(() => this.display())
+                        .catch((e) => plugin.displayError(e));
+                })
             )
             .addButton((btn) =>
-                btn
-                    .setButtonText("Clone remote repo…")
-                    .onClick(() => {
-                        plugin
-                            .promptCloneRepo()
-                            .then(() => this.display())
-                            .catch((e) => plugin.displayError(e));
-                    })
+                btn.setButtonText("Clone remote repo…").onClick(() => {
+                    plugin
+                        .promptCloneRepo()
+                        .then(() => this.display())
+                        .catch((e) => plugin.displayError(e));
+                })
             );
 
         if (plugin.settings.repos.length > 0) {
             new Setting(containerEl)
                 .setName("Default repository")
-                .setDesc(
-                    "Used when no file is open and no override is set."
-                )
+                .setDesc("Used when no file is open and no override is set.")
                 .addDropdown((dd) => {
                     dd.addOption("", "(none)");
                     for (const c of plugin.settings.repos) {
@@ -1650,6 +1759,31 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
         }
     }
 
+    /**
+     * Renders the editing-scope dropdown beneath the Repositories section.
+     * Lets the user switch between Global defaults and any registered repo.
+     */
+    private renderScopeSelector(): void {
+        const { containerEl } = this;
+        const plugin = this.plugin;
+
+        const setting = new Setting(containerEl)
+            .setName("Editing settings for")
+            .addDropdown((dd) => {
+                dd.addOption("global", "Global defaults");
+                for (const c of plugin.settings.repos) {
+                    dd.addOption(c.id, c.displayName);
+                }
+                dd.setValue(this.editingScope).onChange((v) => {
+                    this.editingScope = v || "global";
+                    this.display();
+                });
+            });
+        setting.descEl.setText(
+            "Per-repo settings inherit unset values from Global defaults. Clearing an override reverts a repo to the inherited value."
+        );
+    }
+
     private async openAddRepoFlow(): Promise<void> {
         const plugin = this.plugin;
         const modal = new GeneralModal(plugin, {
@@ -1660,9 +1794,7 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
         const raw = await modal.openAndGetResult();
         if (raw === undefined) return;
         const path = normalizeRepoPath(raw);
-        if (
-            plugin.settings.repos.some((r) => repoPathsOverlap(r.path, path))
-        ) {
+        if (plugin.settings.repos.some((r) => repoPathsOverlap(r.path, path))) {
             plugin.displayError(
                 `Path "${path || "<root>"}" overlaps an existing registered repo.`
             );
