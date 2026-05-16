@@ -112,7 +112,7 @@
         <div
             class="clickable-icon"
             aria-label="Refresh"
-            data-icon="refresh-cw"
+            data-icon="rotate-cw"
             bind:this={iconHosts[2]}
             onclick={(e) => {
                 e.stopPropagation();

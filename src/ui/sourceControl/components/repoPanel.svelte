@@ -53,6 +53,9 @@
 
     let showTree = $derived(plugin.settings.treeStructure);
     let rows = $derived((commitMessage.match(/\n/g)?.length ?? 0) + 1);
+    let hasChanges = $derived(
+        (status?.staged.length ?? 0) + (status?.changed.length ?? 0) > 0
+    );
 
     onMount(() => {
         view.registerEvent(
@@ -264,7 +267,7 @@
             <button
                 class="git-repo-commit-button mod-cta"
                 onclick={commit}
-                disabled={!status}
+                disabled={!status || !hasChanges}
             >
                 Commit
             </button>
@@ -535,6 +538,16 @@
         width: calc(100% - var(--size-4-8));
         margin: 4px auto 8px auto;
         height: 32px;
+
+        &:disabled,
+        &:disabled:hover {
+            background-color: var(--interactive-accent);
+            color: var(--text-on-accent);
+            cursor: not-allowed;
+            opacity: 1;
+            filter: brightness(0.8);
+            box-shadow: none;
+        }
     }
 
     .git-tools {
