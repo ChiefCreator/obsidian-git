@@ -659,6 +659,20 @@ export class SimpleGit extends GitManager {
             }
 
             await this.git.fetch();
+            // After fetch, the local remote-tracking ref may still be missing
+            // if the branch doesn't exist on the remote (deleted, or
+            // upstream configured but never created). Resolving it would
+            // throw `fatal: bad revision '<remote>/<branch>'` from the
+            // call below; bail out cleanly instead of cascading the error
+            // up through commit-and-sync as a user-visible notice.
+            const [remote] = splitRemoteBranch(branchInfo.tracking!);
+            const remoteBranches = await this.getRemoteBranches(remote);
+            if (!remoteBranches.includes(branchInfo.tracking!)) {
+                this.plugin.log(
+                    `Tracking branch ${branchInfo.tracking} does not exist on remote ${remote}. Skipping pull.`
+                );
+                return [];
+            }
             const upstreamCommit = await this.git.revparse([
                 branchInfo.tracking!,
             ]);
@@ -808,6 +822,19 @@ export class SimpleGit extends GitManager {
         const trackingBranch = status.tracking;
         const currentBranch = status.current!;
         if (!trackingBranch) {
+            return false;
+        }
+        // The local remote-tracking ref (e.g. `refs/remotes/origin/main`) may
+        // be missing even though `status.tracking` is set in config — e.g. a
+        // fresh repo that has never been fetched, or the upstream branch was
+        // deleted. Without this guard, `diffSummary` below throws
+        // `fatal: bad revision '<remote>/<branch>'`.
+        const [remote] = splitRemoteBranch(trackingBranch);
+        const remoteBranches = await this.getRemoteBranches(remote);
+        if (!remoteBranches.includes(trackingBranch)) {
+            this.plugin.log(
+                `Tracking branch ${trackingBranch} does not exist on remote ${remote}.`
+            );
             return false;
         }
         const remoteChangedFiles = (
