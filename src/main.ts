@@ -2046,10 +2046,13 @@ export default class ObsidianGit extends Plugin {
         }
     }
 
-    async discardAll(path?: string): Promise<DiscardResult> {
+    async discardAll(path?: string, repo?: GitRepo): Promise<DiscardResult> {
         if (!(await this.isAllInitialized())) return false;
 
-        const status = await this.gitManager.status({ path });
+        const target = repo ?? this.activeRepo();
+        if (!target) return false;
+
+        const status = await target.gitManager.status({ path });
 
         let filesToDeleteCount = 0;
         let filesToDiscardCount = 0;
@@ -2075,23 +2078,23 @@ export default class ObsidianGit extends Plugin {
             case false:
                 return result;
             case "discard":
-                await this.gitManager.discardAll({
+                await target.gitManager.discardAll({
                     dir: path,
-                    status: this.cachedStatus,
+                    status: target.cachedStatus,
                 });
                 break;
             case "delete": {
-                await this.gitManager.discardAll({
+                await target.gitManager.discardAll({
                     dir: path,
-                    status: this.cachedStatus,
+                    status: target.cachedStatus,
                 });
-                const untrackedPaths = await this.gitManager.getUntrackedPaths({
+                const untrackedPaths = await target.gitManager.getUntrackedPaths({
                     path,
-                    status: this.cachedStatus,
+                    status: target.cachedStatus,
                 });
                 for (const file of untrackedPaths) {
                     const vaultPath =
-                        this.gitManager.getRelativeVaultPath(file);
+                        target.gitManager.getRelativeVaultPath(file);
                     const tFile =
                         this.app.vault.getAbstractFileByPath(vaultPath);
 
@@ -2110,7 +2113,7 @@ export default class ObsidianGit extends Plugin {
             default:
                 assertNever(result);
         }
-        this.app.workspace.trigger("obsidian-git:refresh");
+        this.app.workspace.trigger("obsidian-git:refresh", target.id);
         return result;
     }
 

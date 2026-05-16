@@ -2,6 +2,7 @@
 <script lang="ts">
     import TreeComponent from "./treeComponent.svelte";
 
+    import type { GitRepo } from "src/gitRepo";
     import type ObsidianGit from "src/main";
     import type { StatusRootTreeItem, TreeItem } from "src/types";
     import { FileType } from "src/types";
@@ -17,6 +18,7 @@
         hierarchy: StatusRootTreeItem;
         plugin: ObsidianGit;
         view: GitView;
+        repo: GitRepo;
         fileType: FileType;
         topLevel?: boolean;
         closed: Record<string, boolean>;
@@ -26,6 +28,7 @@
         hierarchy,
         plugin,
         view,
+        repo,
         fileType,
         topLevel = false,
         closed = $bindable(),
@@ -44,25 +47,25 @@
 
     function stage(event: MouseEvent, path: string) {
         event.stopPropagation();
-        plugin.gitManager
+        repo.gitManager
             .stageAll({ dir: path })
             .catch((e) => plugin.displayError(e))
             .finally(() => {
-                view.app.workspace.trigger("obsidian-git:refresh");
+                view.app.workspace.trigger("obsidian-git:refresh", repo.id);
             });
     }
     function unstage(event: MouseEvent, path: string) {
         event.stopPropagation();
-        plugin.gitManager
+        repo.gitManager
             .unstageAll({ dir: path })
             .catch((e) => plugin.displayError(e))
             .finally(() => {
-                view.app.workspace.trigger("obsidian-git:refresh");
+                view.app.workspace.trigger("obsidian-git:refresh", repo.id);
             });
     }
     function discard(event: MouseEvent, item: TreeItem) {
         event.stopPropagation();
-        void plugin.discardAll(item.vaultPath);
+        void plugin.discardAll(item.vaultPath, repo);
     }
     function fold(event: MouseEvent, item: TreeItem) {
         event.stopPropagation();
@@ -232,6 +235,7 @@
                             hierarchy={entity as StatusRootTreeItem}
                             {plugin}
                             {view}
+                            {repo}
                             {fileType}
                             bind:closed
                         />

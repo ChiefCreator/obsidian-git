@@ -392,6 +392,10 @@ declare module "obsidian" {
         openWithDefaultApp(path: string): void;
         getTheme(): "obsidian" | "moonstone";
         viewRegistry: ViewRegistry;
+        setting: {
+            open(): void;
+            openTabById(id: string): void;
+        };
     }
     interface View {
         titleEl: HTMLElement;
