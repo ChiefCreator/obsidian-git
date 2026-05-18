@@ -1,0 +1,10 @@
+{
+    "author": "Kiryl Pelarski",
+    "authorUrl": "https://github.com/ChiefCreator",
+    "id": "pekarski-obsidian-git",
+    "name": "Pekarski Git",
+    "description": "Integrate Git version control with automatic backup and other advanced features.",
+    "isDesktopOnly": false,
+    "fundingUrl": "https://ko-fi.com/ChiefCreator",
+    "version": "1.0.0"
+}
