@@ -4,10 +4,6 @@ A powerful community plugin for [Obsidian.md](https://obsidian.md) that brings G
 
 ## 📚 Documentation
 
-All setup instructions (including mobile), common issues, tips, and advanced configuration can be found in the 📖 [full documentation](https://publish.obsidian.md/git-doc).
-
-> Mobile users: The plugin is **highly unstable ⚠️ !** Please check the dedicated [Mobile](#-mobile-support-%EF%B8%8F--experimental) section below.
-
 ## Key Features
 
 - 🔁 **Automatic commit-and-sync** (commit, pull, and push) on a schedule.
@@ -19,34 +15,30 @@ All setup instructions (including mobile), common issues, tips, and advanced con
 - 📝 **Signs in the editor** to indicate added, modified, and deleted lines/hunks (desktop only).
 - GitHub integration to open files and history in your browser
 
-> For detailed file history, consider pairing this plugin with the [Version History Diff](obsidian://show-plugin?id=obsidian-version-history-diff) plugin.
-
 ## UI Previews
 
 ### 🔧 Source Control View
 
 Manage your file changes directly inside Obsidian like stage/unstage individual files and commit them.
 
-![Source Control View](https://raw.githubusercontent.com/Vinzent03/obsidian-git/master/images/source-view.png)
+![Source Control View](images/source-view.png)
+
+Open it from the left sidebar by clicking the source control icon, or via the `Open source control view` command.
+
+![Left Sidebar](images/left-sidebar.png)
 
 ### 📜 History View
 
 Show the commit history of your repository. The commit message, author, date, and changed files can be shown. Author and date are disabled by default as shown in the screenshot, but can be enabled in the settings.
 
-![History View](https://raw.githubusercontent.com/Vinzent03/obsidian-git/master/images/history-view.png)
+![History View](images/history-view.png)
 
 ### 🔍 Diff View 
 
 Compare versions with a clear and concise diff viewer.
 Open it from the source control view or via the `Open diff view` command.
 
-![Diff View](https://raw.githubusercontent.com/Vinzent03/obsidian-git/master/images/diff-view.png)
-
-### 📝 Signs in the Editor
-
-View line-by-line changes directly in the editor with added, modified, and deleted line/hunk indicators. You can stage and reset changes right from the signs. There also commands to navigate between hunks and stage/reset hunks under the cursor. Needs to be enabled in the plugin settings.
-
-![Signs](https://raw.githubusercontent.com/Vinzent03/obsidian-git/master/images/signs.png)
+![Diff View](images/diff-view.png)
 
 ## Available Commands
 > Not exhaustive - these are just some of the most common commands. For a full list, see the Command Palette in Obsidian.
@@ -83,57 +75,3 @@ View line-by-line changes directly in the editor with added, modified, and delet
   - `Open history view`: Opens side pane displaying [History view](#history-view)
   - `Edit .gitignore`
   - `Add file to .gitignore`: Add current file to `.gitignore`
-
-## 💻 Desktop Notes
-
-### 🔐 Authentication
-
-Some Git services may require further setup for HTTPS/SSH authentication. Refer to the [Authentication Guide](https://publish.obsidian.md/git-doc/Authentication)
-
-### Obsidian on Linux
-
-- ⚠️  Snap is not supported due to its sandboxing restrictions.
-- ⚠️  Flatpak is not recommended, because it doesn't have access to all system files. They are actively fixing many issues, but there are still issues. Especially with more advanced setups.
-- ✅ Please use AppImage or a full access installation of your system's package manager instead ([Linux installation guide](https://publish.obsidian.md/git-doc/Installation#Linux))
-
-## 📱 Mobile Support (⚠️  Experimental)
-
-The Git implementation on mobile is **very unstable**! I would not recommend using this plugin on mobile, but try other syncing services.
-
-One such alternative is [GitSync](https://github.com/ViscousPot/GitSync), which is available on both Android and iOS. It is not associated with this plugin, but it may be a better option for mobile users. A tutorial for setting it up can be found [here](https://viscouspotenti.al/posts/gitsync-all-devices-tutorial).
-
-> 🧪 The Git plugin works on mobile thanks to [isomorphic-git](https://isomorphic-git.org/), a JavaScript-based re-implementation of Git - but it comes with serious limitations and issues. It is not possible for an Obsidian plugin to use a native Git installation on Android or iOS.
-
-### ❌ Mobile Feature Limitations
-
-- No **SSH authentication** ([isomorphic-git issue](https://github.com/isomorphic-git/isomorphic-git/issues/231))
-- Limited repo size, because of memory restrictions
-- No rebase merge strategy
-- No submodules support
-
-### ⚠️ Performance Caveats
-
-> [!caution]
-> Depending on your device and available free RAM, Obsidian may
->
-> - crash on clone/pull
-> - create buffer overflow errors
-> - run indefinitely.
->
-> It's caused by the underlying git implementation on mobile, which is not efficient. I don't know how to fix this. If that's the case for you, I have to admit this plugin won't work for you. So commenting on any issue or creating a new one won't help. I am sorry.
-
-### Tips for Mobile Use:
-
-If you have a large repo/vault I recommend to stage individual files and only commit staged files.
-
-## 🙋 Contact & Credits
-
-- The Line Authoring feature was developed by [GollyTicker](https://github.com/GollyTicker), so any questions may be best answered by her.
-- This plugin was initial developed by [denolehov](https://github.com/denolehov). Since March 2021, it's me [Vinzent03](https://github.com/Vinzent03) who is developing this plugin. That's why the GitHub repository got moved to my account in July 2024.
-- If you have any kind of feedback or questions, feel free to reach out via GitHub issues.
-
-## ☕ Support
-
-If you find this plugin useful and would like to support its development, you can support me on Ko-fi.
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/F1F195IQ5)
